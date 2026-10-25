@@ -52,3 +52,15 @@ MCP_API_KEY=<...>
 ## MCP
 
 - `POST/GET /mcp` → servidor MCP (Streamable HTTP) con las 43 tools.
+
+## Deploy en Vercel (alternativa a Railway)
+
+- El backend se expone como función serverless en `api/index.ts` usando el builder `@vercel/node`.
+- `vercel.json` define el build y la route catch-all hacia `api/index.ts`.
+- `src/app.ts` exporta la instancia de Fastify (sin `listen`) para reutilizarla en el handler serverless.
+- Variables de entorno: igual que en Docker (ver arriba).
+
+```bash
+vercel deploy --yes
+```
+
