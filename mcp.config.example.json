@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/mcp-server.json",
+  "mcpServers": {
+    "chatsyncs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {}
+    }
+  }
+}

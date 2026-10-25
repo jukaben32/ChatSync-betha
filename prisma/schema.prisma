@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Subscriber {
+  id             String   @id @default(uuid()) @db.Uuid
+  phone          String   @db.VarChar(32)
+  name           String?  @db.VarChar(255)
+  email          String?  @db.VarChar(320)
+  customFields   Json     @default("{}")
+  labels         SubscriberLabel[]
+  conversations Conversation[]
+  notes          SubscriberNote[]
+  sequences     SubscriberSequence[]
+  orders         Order[]
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  @@unique([phone])
+  @@index([phone])
+}
+
+model Label {
+  id          String             @id @default(uuid()) @db.Uuid
+  name        String             @db.VarChar(255)
+  subscribers SubscriberLabel[]
+  createdAt   DateTime           @default(now()) @db.Timestamptz
+}
+
+model SubscriberLabel {
+  subscriberId String    @db.Uuid
+  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  labelId      String    @db.Uuid
+  label        Label     @relation(fields: [labelId], references: [id], onDelete: Cascade)
+  assignedAt  DateTime @default(now()) @db.Timestamptz
+
+  @@id([subscriberId, labelId])
+}
+
+model Conversation {
+  id             String        @id @default(uuid()) @db.Uuid
+  subscriberId  String        @db.Uuid
+  subscriber    Subscriber    @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  status        String        @default("open") @db.VarChar(32)
+  assignedTo    String?       @db.VarChar(64)
+  channel       String        @default("whatsapp") @db.VarChar(32)
+  messages      Message[]
+  notes         SubscriberNote[]
+  createdAt     DateTime      @default(now()) @db.Timestamptz
+  updatedAt     DateTime      @updatedAt @db.Timestamptz
+
+  @@index([subscriberId, status, updatedAt])
+}
+
+model Message {
+  id             String        @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  direction     String        @db.VarChar(16) // inbound | outbound
+  channel       String        @default("whatsapp") @db.VarChar(32)
+  providerMessageId String?  @db.VarChar(128)
+  body          String        @default("") @db.Text
+  mediaUrl      String?       @db.VarChar(512)
+  status        String        @default("delivered") @db.VarChar(32)
+  metadata      Json          @default("{}")
+  createdAt     DateTime      @default(now()) @db.Timestamptz
+
+  @@index([conversationId, createdAt])
+}
+
+model SubscriberNote {
+  id            String      @id @default(uuid()) @db.Uuid
+  subscriberId String      @db.Uuid
+  conversationId String?   @db.Uuid
+  conversation  Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  author        String      @db.VarChar(64)
+  body          String      @db.Text
+  createdAt     DateTime    @default(now()) @db.Timestamptz
+}
+
+model Sequence {
+  id          String              @id @default(uuid()) @db.Uuid
+  name        String              @db.VarChar(255)
+  steps      SequenceStep[]
+  enrollments SubscriberSequence[]
+  createdAt   DateTime            @default(now()) @db.Timestamptz
+}
+
+model SequenceStep {
+  id          String       @id @default(uuid()) @db.Uuid
+  sequenceId String       @db.Uuid
+  sequence    Sequence     @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  delayDays   Int          @default(0)
+  actionType String       @db.VarChar(64) // send_text | send_template | wait | condition
+  payload     Json         @default("{}")
+  order       Int
+}
+
+model SubscriberSequence {
+  subscriberId String
+  sequenceId   String
+  sequence     Sequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  enrolledAt   DateTime @default(now()) @db.Timestamptz
+  @@id([subscriberId, sequenceId])
+}
+
+model Broadcast {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String        @db.VarChar(255)
+  audience    Json          @default("{}") // segment filters
+  contentType String       @db.VarChar(32) // text | template
+  content    String        @db.Text
+  status      String        @default("draft") @db.VarChar(32)
+  sentCount   Int           @default(0)
+  deliveredCount Int       @default(0)
+  createdAt   DateTime      @default(now()) @db.Timestamptz
+  updatedAt   DateTime      @updatedAt @db.Timestamptz
+}
+
+model Order {
+  id          String       @id @default(uuid()) @db.Uuid
+  subscriberId String    @db.Uuid
+  subscriber   Subscriber  @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  number       String?     @db.VarChar(64)
+  status       String      @default("pending") @db.VarChar(32)
+  amount       Int64        @default(0)
+  currency     String      @default("INR") @db.Char(3)
+  metadata     Json        @default("{}")
+  createdAt    DateTime    @default(now()) @db.Timestamptz
+  updatedAt    DateTime    @updatedAt @db.Timestamptz
+}
+
+model CrmDeal {
+  id          String       @id @default(uuid()) @db.Uuid
+  subscriberId String     @db.Uuid
+  subscriber   Subscriber  @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  stage       String       @default("new") @db.VarChar(64)
+  value       Int64        @default(0)
+  owner       String?      @db.VarChar(64)
+  metadata    Json        @default("{}")
+  createdAt   DateTime    @default(now()) @db.Timestamptz
+  updatedAt   DateTime    @updatedAt @db.Timestamptz
+}
