@@ -28,3 +28,17 @@ Objetivo: tener una app con las mismas funcionalidades de WhatsApp automation pa
 2. Levantar servidor + registrar webhook en Meta.
 3. Conectar dashboard (inbox/broadcasts/flows/agents).
 4. Integrar agente de IA en el loop inbound (persistir tool results en conversaciones).
+
+## Deploy
+
+- **Vercel:** `vercel.json` + `api/index.ts` + `src/app.ts` listos. Ver `docs/DEPLOYMENT.md`.
+- **Supabase Postgres + Docker:** `Dockerfile` + `docker-compose.yml` + `docs/DEPLOYMENT.md`.
+
+```bash
+# Vercel
+vercel deploy --yes
+
+# Docker
+docker build -t chatsyncs-replica .
+docker run -p 8080:8080 --env-file .env chatsyncs-replica
+```
