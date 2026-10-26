@@ -40,6 +40,14 @@ export async function apiRoutes(app: FastifyInstance) {
     return subscriber;
   });
 
+  app.delete('/api/subscribers/:phone', async (request, reply) => {
+    const { phone } = request.params as { phone: string };
+    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
+    await prisma.subscriber.delete({ where: { phone } });
+    return { ok: true };
+  });
+
   app.patch('/api/subscribers/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const body = request.body as { name?: string; email?: string; customFields?: Record<string, unknown> };
@@ -128,6 +136,20 @@ export async function apiRoutes(app: FastifyInstance) {
     return note;
   });
 
+  app.patch('/api/conversations/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { status?: string; assignedTo?: string };
+    const conversation = await prisma.conversation.update({
+      where: { id },
+      data: {
+        ...(body.status ? { status: body.status } : {}),
+        ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo } : {}),
+      },
+      include: { subscriber: true, messages: { orderBy: { createdAt: 'asc' } } },
+    });
+    return conversation;
+  });
+
   // ---------- Broadcasts ----------
   app.get('/api/broadcasts', async () => prisma.broadcast.findMany({ orderBy: { createdAt: 'desc' } }));
   app.post('/api/broadcasts', async (request, reply) => {
@@ -190,6 +212,13 @@ export async function apiRoutes(app: FastifyInstance) {
       take: 200,
     });
     return orders;
+  });
+
+  app.patch('/api/orders/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { status?: string };
+    const order = await prisma.order.update({ where: { id }, data: { status: body.status ?? 'pending' } });
+    return order;
   });
 
   // ---------- CRM deals ----------
