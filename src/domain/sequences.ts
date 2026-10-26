@@ -21,7 +21,7 @@ export async function triggerSequenceForSubscriber(params: { phone: string; sequ
     include: { steps: true },
   });
   if (sequence) {
-    await runFlow({ phone: params.phone, flow: { id: sequence.id, name: sequence.name, steps: sequence.steps } });
+    await runFlow({ phone: params.phone, flow: { id: sequence.id, name: sequence.name, steps: sequence.steps as any } });
   }
   return enrollment;
 }
@@ -32,6 +32,6 @@ export async function triggerBotFlowForSubscriber(params: { phone: string; flowI
     include: { steps: true },
   });
   if (!flow) throw new Error('bot_flow_not_found');
-  const result = await runFlow({ phone: params.phone, flow });
+  const result = await runFlow({ phone: params.phone, flow: flow as any });
   return result;
 }

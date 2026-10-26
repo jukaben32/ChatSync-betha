@@ -60,7 +60,7 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ---------- Labels ----------
-  app.get('/api/labels', async () => prisma.label.findMany({ include: { _count: { select: true } } }));
+  app.get('/api/labels', async () => prisma.label.findMany({ include: { _count: { select: { subscribers: true } } } }));
   app.post('/api/labels', async (request, reply) => {
     const body = request.body as { name?: string };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
@@ -130,8 +130,10 @@ export async function apiRoutes(app: FastifyInstance) {
   app.post('/api/conversations/:id/notes', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as { author?: string; body?: string };
+    const conversation = await prisma.conversation.findUnique({ where: { id } });
+    if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
     const note = await prisma.subscriberNote.create({
-      data: { conversationId: id, author: body.author ?? 'agent', body: body.body ?? '' },
+      data: { subscriberId: conversation.subscriberId, conversationId: id, author: body.author ?? 'agent', body: body.body ?? '' },
     });
     return note;
   });
@@ -178,12 +180,12 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   // ---------- Sequences ----------
-  app.get('/api/sequences', async () => prisma.sequence.findMany({ include: { _count: { select: true } } }));
+  app.get('/api/sequences', async () => prisma.sequence.findMany({ include: { _count: { select: { enrollments: true } } } }));
   app.post('/api/sequences', async (request, reply) => {
     const body = request.body as { name?: string; steps?: any[] };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
     const sequence = await prisma.sequence.create({
-      data: { name: body.name, steps: body.steps ?? [] },
+      data: { name: body.name, steps: { create: (body.steps ?? []).map((s: any, i: number) => ({ action: s.action, params: s.params ?? {}, delayDays: s.delayDays ?? 0, order: s.order ?? i })) } },
       include: { steps: true },
     });
     return reply.code(201).send(sequence);

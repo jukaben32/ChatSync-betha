@@ -29,7 +29,7 @@ model Subscriber {
 
 model Label {
   id          String             @id @default(uuid()) @db.Uuid
-  name        String             @db.VarChar(255)
+  name        String             @unique @db.VarChar(255)
   subscribers SubscriberLabel[]
   createdAt   DateTime           @default(now()) @db.Timestamptz
 }
@@ -99,8 +99,8 @@ model SequenceStep {
   sequenceId String       @db.Uuid
   sequence    Sequence     @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
   delayDays   Int          @default(0)
-  actionType String       @db.VarChar(64) // send_text | send_template | wait | condition
-  payload     Json         @default("{}")
+  action     String       @db.VarChar(64) // send_text | send_template | wait | condition
+  params      Json         @default("{}")
   order       Int
 }
 
