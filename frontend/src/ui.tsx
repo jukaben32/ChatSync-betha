@@ -102,3 +102,57 @@ export function ErrorNote({ message }: { message: string }) {
 export function Avatar({ text }: { text: string }) {
   return <span className="avatar">{text}</span>
 }
+
+/** Símbolo de marca de Betha IA (el mismo de betha-ai.vercel.app). */
+export function BrandMark({ className = 'brandmark' }: { className?: string }) {
+  return (
+    <svg className={className} aria-hidden="true" viewBox="0 0 160 176" fill="currentColor">
+      <path d="M20 76V24C20 10 29 4 39 4s17 8 17 19v28L20 83Z" />
+      <path d="M62 7c20 18 24 40 15 56L39 96c-12 11-19 21-19 34 0 20 15 30 40 30h30c28 0 45-16 45-39 0-26-17-44-42-44H80l-18 19h27c15 0 24 10 24 24s-10 21-24 21H58c-15 0-22-5-22-14 0-7 5-14 14-22l30-27C99 58 91 29 62 7Z" />
+    </svg>
+  )
+}
+
+export function Brand({ style }: { style?: React.CSSProperties }) {
+  return (
+    <div className="brand" style={style}>
+      <BrandMark />
+      <span>betha</span>
+      <small>IA</small>
+    </div>
+  )
+}
+
+type Theme = 'dark' | 'light' | 'auto'
+
+function readTheme(): Theme {
+  try {
+    const t = localStorage.getItem('chatsyncs_theme')
+    return t === 'light' || t === 'auto' ? t : 'dark'
+  } catch {
+    return 'dark'
+  }
+}
+
+/** Selector de tema: oscuro (marca Betha IA, por defecto), claro, o el del sistema. */
+export function ThemeSwitch() {
+  const [theme, setTheme] = useState<Theme>(readTheme)
+  const choose = (t: Theme) => {
+    setTheme(t)
+    document.documentElement.dataset.theme = t
+    try {
+      localStorage.setItem('chatsyncs_theme', t)
+    } catch {
+      /* almacenamiento no disponible */
+    }
+  }
+  return (
+    <div className="theme-switch" role="group" aria-label="Tema">
+      {([['auto', 'Auto'], ['light', 'Claro'], ['dark', 'Oscuro']] as [Theme, string][]).map(([t, label]) => (
+        <button key={t} className={theme === t ? 'on' : ''} onClick={() => choose(t)} aria-pressed={theme === t}>
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}

@@ -4,7 +4,7 @@ import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-do
 import { ApiError, api, getKey, setKey } from './api'
 import { MeContext } from './auth'
 import type { Me } from './auth'
-import { ErrorNote } from './ui'
+import { Brand, ErrorNote, ThemeSwitch } from './ui'
 import Dashboard from './pages/Dashboard'
 import Inbox from './pages/Inbox'
 import Contacts from './pages/Contacts'
@@ -89,9 +89,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
   return (
     <div className="login">
       <form className="card" onSubmit={submit}>
-        <div className="brand" style={{ padding: '0 0 16px' }}>
-          <span className="brand-dot">C</span> ChatSyncs
-        </div>
+        <Brand style={{ padding: '0 0 18px' }} />
         <div className="tabs">
           <button type="button" className={`tab ${mode === 'team' ? 'active' : ''}`} onClick={() => setMode('team')}>
             Equipo
@@ -134,9 +132,7 @@ function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   return (
     <div className="shell">
       <aside className={`sidebar ${open ? 'open' : ''}`} onClick={() => setOpen(false)}>
-        <div className="brand">
-          <span className="brand-dot">C</span> ChatSyncs
-        </div>
+        <Brand />
         {groups.map((g) => (
           <div key={g.group}>
             <div className="nav-group">{g.group}</div>
@@ -149,6 +145,7 @@ function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
           </div>
         ))}
         <div className="sidebar-foot">
+          <ThemeSwitch />
           {me.name && me.name !== 'Admin' && (
             <div className="muted" style={{ padding: '0 10px 8px' }}>
               {me.name} · {isAgent ? 'Agente' : 'Admin'}
