@@ -107,6 +107,11 @@ export async function whatsappRoutes(app: FastifyInstance) {
               messageType: msg.type,
               interactiveId: msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? msg.button?.payload,
               source: msg.referral?.source_id ? `ctwa:${msg.referral.source_id}` : undefined,
+              media: msg.audio?.id
+                ? { kind: 'audio', id: msg.audio.id }
+                : msg.image?.id
+                  ? { kind: 'image', id: msg.image.id, caption: msg.image.caption }
+                  : undefined,
             });
           } catch (error) {
             request.log.error({ err: error, from: msg.from }, 'whatsapp_inbound_failed');

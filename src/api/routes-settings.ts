@@ -30,11 +30,22 @@ function htmlToText(html: string) {
 export async function settingsRoutes(app: FastifyInstance) {
   // ---------- Consola de pruebas: simula un mensaje de cliente (solo clave de administrador) ----------
   app.post('/api/simulate/inbound', async (request, reply) => {
-    const b = request.body as { phone?: string; name?: string; body?: string; interactiveId?: string };
+    const b = request.body as { phone?: string; name?: string; body?: string; interactiveId?: string; mediaKind?: string; mediaBase64?: string; mediaMime?: string };
     const phone = String(b.phone ?? '').replace(/\D/g, '');
-    if (phone.length < 7 || !b.body) return reply.code(400).send({ error: 'phone and body are required' });
-    const result = await handleInbound({ phone, name: b.name, body: b.body, interactiveId: b.interactiveId, messageType: b.interactiveId ? 'interactive' : 'text', providerMessageId: `sim.${Date.now()}.${Math.random().toString(36).slice(2, 8)}` });
-    return { ok: true, handledBy: (result as any).handledBy ?? null, conversationId: result.conversationId };
+    const kind: 'image' | 'audio' | undefined = b.mediaKind === 'image' || b.mediaKind === 'audio' ? b.mediaKind : undefined;
+    if (phone.length < 7 || (!b.body && !(kind && b.mediaBase64))) return reply.code(400).send({ error: 'phone and body (or mediaKind + mediaBase64) are required' });
+    const media = kind && b.mediaBase64 ? { kind, data: Buffer.from(b.mediaBase64, 'base64'), mime: b.mediaMime, caption: b.body } : undefined;
+    const result = await handleInbound({
+      phone,
+      name: b.name,
+      body: b.body ?? (kind === 'audio' ? '[audio]' : '[imagen]'),
+      interactiveId: b.interactiveId,
+      messageType: kind ?? (b.interactiveId ? 'interactive' : 'text'),
+      media,
+      providerMessageId: `sim.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`,
+    });
+    const saved = await prisma.message.findFirst({ where: { conversationId: result.conversationId, direction: 'inbound' }, orderBy: { createdAt: 'desc' } });
+    return { ok: true, handledBy: (result as any).handledBy ?? null, conversationId: result.conversationId, body: saved?.body, media: saved?.metadata };
   });
 
   // ---------- Ajustes (horario comercial, IA, asignación) ----------

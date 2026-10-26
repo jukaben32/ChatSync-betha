@@ -31,12 +31,12 @@ type ChatMessage = Record<string, unknown>;
 type ToolCall = { id: string; function: { name: string; arguments?: string } };
 type Completion = { content?: string; tool_calls?: ToolCall[] };
 
-export async function complete(messages: ChatMessage[], tools?: unknown[], maxTokens = 1024): Promise<Completion | undefined> {
+export async function complete(messages: ChatMessage[], tools?: unknown[], maxTokens = 1024, model?: string): Promise<Completion | undefined> {
   const c = agentConfig();
   const response = await fetch(`${c.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-    body: JSON.stringify({ model: c.model, messages, max_tokens: maxTokens, ...(tools?.length ? { tools } : {}) }),
+    body: JSON.stringify({ model: model || c.model, messages, max_tokens: maxTokens, ...(tools?.length ? { tools } : {}) }),
     signal: AbortSignal.timeout(40_000),
   });
   if (!response.ok) throw new Error(`llm_error ${response.status}: ${(await response.text()).slice(0, 300)}`);

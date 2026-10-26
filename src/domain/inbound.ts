@@ -1,6 +1,7 @@
 import { prisma } from '../prisma.js';
 import { runFlow, findActiveSession, resumeFlowSession } from '../flows/engine.js';
 import { agentReady, runAgentTurn } from '../ai/agent.js';
+import { understandMedia, type InboundMedia } from '../ai/media.js';
 import { markWhatsAppRead } from '../whatsapp/rich.js';
 import { whatsappConfigured } from '../config.js';
 import { emitEvent } from './events.js';
@@ -17,6 +18,8 @@ export interface InboundContext {
   /** Origen del lead, p. ej. "ctwa:<ad_id>" cuando llega desde un anuncio de Click-to-WhatsApp. */
   source?: string;
   mediaUrl?: string;
+  /** Imagen o nota de voz a interpretar con IA (ver ai/media.ts). */
+  media?: InboundMedia;
 }
 
 /** contains = el mensaje incluye la palabra · exact = el mensaje es exactamente la palabra · starts = empieza por ella */
@@ -73,7 +76,7 @@ async function pickRoundRobin(): Promise<string | null> {
  * → horario comercial → palabra clave de flujo → agente de IA.
  */
 export async function handleInbound(params: InboundContext) {
-  const { phone, name, body = '', providerMessageId, messageType, interactiveId, source, mediaUrl } = params;
+  const { phone, name, body: rawBody = '', providerMessageId, messageType, interactiveId, source, mediaUrl, media } = params;
 
   const existingSubscriber = await prisma.subscriber.findUnique({ where: { phone } });
   const subscriber = await prisma.subscriber.upsert({
@@ -88,6 +91,25 @@ export async function handleInbound(params: InboundContext) {
     if (duplicate) return { subscriber, conversationId: duplicate.conversationId, duplicate: true };
   }
 
+  // Notas de voz → transcripción; imágenes → descripción. Si falla, se conserva el texto original y se anota el motivo.
+  let body = rawBody;
+  const mediaMeta: Record<string, unknown> = {};
+  if (media) {
+    try {
+      const result = await understandMedia(media);
+      if (media.kind === 'audio') {
+        body = result.text;
+        mediaMeta.transcript = result.text;
+      } else {
+        body = media.caption ? `${media.caption}\n[imagen: ${result.text}]` : `[imagen: ${result.text}]`;
+        mediaMeta.description = result.text;
+      }
+      mediaMeta.understood = media.kind;
+    } catch (error) {
+      mediaMeta.mediaError = (error as Error).message.slice(0, 160);
+    }
+  }
+
   const conversation = await getOrCreateConversation(subscriber.id);
   const reopened = conversation.status === 'pending' || conversation.status === 'solved';
   await prisma.message.create({
@@ -98,7 +120,7 @@ export async function handleInbound(params: InboundContext) {
       body,
       mediaUrl,
       status: 'received',
-      metadata: { type: messageType ?? 'text', ...(interactiveId ? { interactiveId } : {}) },
+      metadata: { type: messageType ?? 'text', ...(interactiveId ? { interactiveId } : {}), ...mediaMeta },
     },
   });
   await prisma.conversation.update({
