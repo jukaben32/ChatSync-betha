@@ -1,5 +1,6 @@
 import { CHATSYNC_TOOLS, executeChatsycsTool } from './tools.js';
 import { prisma } from '../prisma.js';
+import { env } from '../config.js';
 
 export interface AgentConfig {
   enabled: boolean;
@@ -13,7 +14,7 @@ export function agentConfig(): AgentConfig {
   return {
     enabled: process.env.AI_AGENT_ENABLED !== 'false',
     baseUrl: process.env.AI_BASE_URL ?? 'https://openrouter.ai/api/v1',
-    apiKey: process.env.AI_API_KEY ?? '',
+    apiKey: env('AI_API_KEY'),
     model: process.env.AI_MODEL ?? 'openai/gpt-4o-mini',
     maxIterations: Number(process.env.AI_MAX_ITERATIONS ?? 6),
   };

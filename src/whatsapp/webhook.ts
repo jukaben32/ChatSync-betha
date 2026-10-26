@@ -69,7 +69,7 @@ function validSignature(rawBody: Buffer | undefined, header: string | undefined)
 export async function whatsappRoutes(app: FastifyInstance) {
   app.get('/webhook', async (request, reply) => {
     const query = request.query as Record<string, string>;
-    if (query['hub.mode'] !== 'subscribe' || query['hub.verify_token'] !== config.whatsapp.webhookVerifyToken) {
+    if (!config.whatsapp.webhookVerifyToken || query['hub.mode'] !== 'subscribe' || query['hub.verify_token'] !== config.whatsapp.webhookVerifyToken) {
       return reply.code(403).send({ error: 'forbidden' });
     }
     return reply.type('text/plain').send(query['hub.challenge']);
