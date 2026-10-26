@@ -72,3 +72,29 @@ describe('red y utilidades', () => {
     expect(env('TEST_X')).toBe('real-value');
   });
 });
+
+import { matchesKeyword } from '../src/domain/inbound.js';
+import { subscriberWhere } from '../src/domain/subscriber-filters.js';
+
+describe('palabras clave de flujos', () => {
+  it('contains, exact y starts', () => {
+    expect(matchesKeyword('quiero el menu por favor', 'menu', 'contains')).toBe(true);
+    expect(matchesKeyword('menu', 'menu', 'exact')).toBe(true);
+    expect(matchesKeyword('el menu', 'menu', 'exact')).toBe(false);
+    expect(matchesKeyword('menu del dia', 'menu', 'starts')).toBe(true);
+    expect(matchesKeyword('ver menu', 'menu', 'starts')).toBe(false);
+    expect(matchesKeyword('hola', null, 'contains')).toBe(false);
+  });
+});
+
+describe('filtros de contactos', () => {
+  it('traduce los filtros a condiciones de Prisma', () => {
+    expect(subscriberWhere({})).toEqual({});
+    expect(subscriberWhere({ status: 'subscribed' })).toMatchObject({ blocked: false, optedOut: false });
+    expect(subscriberWhere({ status: 'unsubscribed' })).toMatchObject({ optedOut: true });
+    expect(subscriberWhere({ status: 'blocked' })).toMatchObject({ blocked: true });
+    expect(subscriberWhere({ list: 'VIP' }).lists.some.list.name).toBe('VIP');
+    expect(subscriberWhere({ sequence: 'abc' }).sequences.some).toMatchObject({ sequenceId: 'abc', status: 'active' });
+    expect(subscriberWhere({ q: 'ana' }).OR).toHaveLength(3);
+  });
+});

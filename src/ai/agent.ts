@@ -210,6 +210,20 @@ export async function rewriteReply(text: string, tone = 'amable y profesional'):
   return out?.content?.trim() ?? text;
 }
 
+/** Para el equipo: traduce un mensaje al idioma indicado (código ISO o nombre). */
+export async function translateText(text: string, target: string): Promise<string> {
+  if (!agentReady()) throw new Error('agent_disabled');
+  const out = await complete(
+    [
+      { role: 'system', content: `Traduce el mensaje al idioma "${target}". Devuelve solo la traducción, sin comentarios. Si ya está en ese idioma, devuélvelo igual.` },
+      { role: 'user', content: text },
+    ],
+    undefined,
+    600,
+  );
+  return out?.content?.trim() ?? text;
+}
+
 /** Para el equipo: sugiere una respuesta basada en el historial y la base de conocimiento. */
 export async function suggestReply(phone: string, history: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<string> {
   if (!agentReady()) throw new Error('agent_disabled');

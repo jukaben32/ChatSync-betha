@@ -40,6 +40,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     ai: await getSetting('ai'),
     assignment: await getSetting('assignment'),
     sandbox: await getSetting('sandbox'),
+    agent: await getSetting('agent'),
   }));
 
   app.put('/api/settings/:key', async (request, reply) => {
@@ -203,7 +204,9 @@ export async function settingsRoutes(app: FastifyInstance) {
   app.get('/api/analytics/overview', async () => {
     const since = new Date(Date.now() - 7 * 86_400_000);
     since.setHours(0, 0, 0, 0);
-    const [subscribers, newSubscribers, open, pending, solved, messages, broadcasts, deals, labels, sources, followUps] = await Promise.all([
+    const since30 = new Date(Date.now() - 30 * 86_400_000);
+    since30.setHours(0, 0, 0, 0);
+    const [subscribers, newSubscribers, open, pending, solved, messages, broadcasts, deals, labels, sources, followUps, joined30, left30, b30] = await Promise.all([
       prisma.subscriber.count(),
       prisma.subscriber.count({ where: { createdAt: { gte: since } } }),
       prisma.conversation.count({ where: { status: 'open' } }),
@@ -215,7 +218,18 @@ export async function settingsRoutes(app: FastifyInstance) {
       prisma.label.findMany({ include: { _count: { select: { subscribers: true } } }, orderBy: { name: 'asc' }, take: 10 }),
       prisma.subscriber.groupBy({ by: ['source'], _count: true }),
       prisma.conversation.count({ where: { followUpAt: { lte: new Date() }, status: { in: ['open', 'pending'] } } }),
+      prisma.subscriber.findMany({ where: { createdAt: { gte: since30 } }, select: { createdAt: true }, take: 20_000 }),
+      prisma.subscriber.count({ where: { OR: [{ optedOut: true }, { blocked: true }], updatedAt: { gte: since30 } } }),
+      prisma.broadcast.findMany({ where: { createdAt: { gte: since30 } }, select: { status: true, sentCount: true, readCount: true, failedCount: true } }),
     ]);
+    const growth = new Map<string, number>();
+    for (let i = 0; i < 31; i++) growth.set(new Date(since30.getTime() + i * 86_400_000).toISOString().slice(0, 10), 0);
+    for (const j of joined30) {
+      const k = j.createdAt.toISOString().slice(0, 10);
+      if (growth.has(k)) growth.set(k, (growth.get(k) ?? 0) + 1);
+    }
+    const b30sent = b30.reduce((n, b) => n + b.sentCount, 0);
+    const b30read = b30.reduce((n, b) => n + b.readCount, 0);
 
     const perDay = new Map<string, { date: string; inbound: number; outbound: number }>();
     for (let i = 0; i < 8; i++) {
@@ -242,6 +256,14 @@ export async function settingsRoutes(app: FastifyInstance) {
         failed: broadcasts._sum.failedCount ?? 0,
         deliveryRate: sent ? Math.round((delivered / sent) * 100) : 0,
         readRate: sent ? Math.round((read / sent) * 100) : 0,
+      },
+      growth30: { joined: joined30.length, left: left30, perDay: [...growth.entries()].map(([date, count]) => ({ date, count })) },
+      broadcasts30: {
+        campaigns: b30.length,
+        completed: b30.filter((b) => b.status === 'sent').length,
+        messagesSent: b30sent,
+        failed: b30.reduce((n, b) => n + b.failedCount, 0),
+        avgOpenRate: b30sent ? Math.round((b30read / b30sent) * 100) : 0,
       },
       deals: deals.map((d) => ({ stage: d.stage, count: d._count, value: d._sum.value ?? 0 })),
       labels: labels.map((l) => ({ name: l.name, subscribers: l._count.subscribers })),

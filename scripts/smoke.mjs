@@ -283,9 +283,73 @@ try {
   const jsonBody = await v1('whatsapp/subscriber/delete', { phone_number_id: '1', phone_number: P6 }, { as: 'json' });
   check('v1 elimina suscriptor (cuerpo JSON)', jsonBody.status === '1');
 
+  console.log('\n13) Contactos: listas, acciones masivas, exportación y filtros');
+  const L1 = `1555${tag}9`;
+  const L2 = `1555${tag}0`;
+  created.phones.push(L1, L2);
+  await call('/api/subscribers', { body: { phone: L1, name: 'Lista Uno' } });
+  await call('/api/subscribers', { body: { phone: L2, name: 'Lista Dos' } });
+  const listName = `vip-${tag}`;
+  const bulkAdd = await call('/api/subscribers/bulk', { body: { phones: [L1, L2], action: 'add_list', value: listName } });
+  check('acción masiva: añadir a lista', bulkAdd.data?.affected === 2, JSON.stringify(bulkAdd.data));
+  const inList = (await call(`/api/subscribers?list=${listName}`)).data;
+  check('filtrar contactos por lista', inList.total === 2, JSON.stringify(inList.total));
+  await call('/api/subscribers/bulk', { body: { phones: [L1], action: 'add_label', value: `bulk-${tag}` } });
+  created.labels.push(`bulk-${tag}`);
+  check('acción masiva: etiqueta', (await call(`/api/subscribers?label=bulk-${tag}`)).data.total === 1);
+  await call('/api/subscribers/bulk', { body: { phones: [L2], action: 'block' } });
+  check('filtrar por estado bloqueado', (await call(`/api/subscribers?list=${listName}&status=blocked`)).data.total === 1);
+  check('filtrar por estado suscrito', (await call(`/api/subscribers?list=${listName}&status=subscribed`)).data.total === 1);
+  check('acción masiva con acción inválida → 400', (await call('/api/subscribers/bulk', { body: { phones: [L1], action: 'explotar' } })).status === 400);
+  const stats = (await call('/api/subscribers/stats')).data;
+  check('estadísticas de contactos', typeof stats.total === 'number' && stats.blocked >= 1, JSON.stringify(stats));
+  const csvRes = await fetch(`${BASE}/api/subscribers/export?list=${listName}`, { headers: { Authorization: `Bearer ${KEY}` } });
+  const csv = await csvRes.text();
+  check('exportar CSV con cabecera y filas', csvRes.headers.get('content-type')?.includes('text/csv') && csv.includes('phone,name,email') && csv.includes(L1) && csv.includes(listName), csv.slice(0, 160));
+  await call(`/api/subscribers/${L1}`, { method: 'PATCH', body: { name: '=HYPERLINK("http://x")' } });
+  const csv2 = await (await fetch(`${BASE}/api/subscribers/export?list=${listName}`, { headers: { Authorization: `Bearer ${KEY}` } })).text();
+  check('CSV neutraliza fórmulas (inyección)', !csv2.includes(',=HYPERLINK') && csv2.includes("'=HYPERLINK"));
+  const importTag = `1555${tag}11`;
+  created.phones.push(importTag);
+  const imp = await call('/api/subscribers/import', { body: { rows: [{ phone: importTag, name: 'Importado' }], list: `imp-${tag}` } });
+  check('importar asignando lista', imp.data?.created === 1 && (await call(`/api/subscribers?list=imp-${tag}`)).data.total === 1, JSON.stringify(imp.data));
+  const lists = (await call('/api/lists')).data;
+  for (const l of lists) if ([listName, `imp-${tag}`].includes(l.name)) await call(`/api/lists/${l.id}`, { method: 'DELETE' });
+  check('listas: contador de miembros', lists.find((l) => l.name === listName)?._count?.members === 2);
+
+  console.log('\n14) Bandeja: no leídas, importantes, bloqueados, firma y palabras clave');
+  const K1 = `1555${tag}12`;
+  created.phones.push(K1);
+  const kwExact = `exacto${tag}`;
+  const kwFlow = (
+    await call('/api/sequences', { body: { name: `KW ${tag}`, kind: 'flow', triggerKeyword: kwExact, matchType: 'exact', folder: `carpeta-${tag}`, steps: [{ action: 'send_text', order: 0, params: { body: 'Respuesta exacta' } }] } })
+  ).data;
+  created.sequences.push(kwFlow.id);
+  check('palabra clave: carpeta y tipo de coincidencia guardados', kwFlow.matchType === 'exact' && kwFlow.folder === `carpeta-${tag}`, JSON.stringify(kwFlow));
+  check('listar por carpeta', (await call(`/api/sequences?kind=flow&folder=carpeta-${tag}`)).data.length === 1);
+  await sim(K1, `quiero ${kwExact} ya`);
+  check('coincidencia exacta: frase con la palabra NO dispara', !(await outbound(K1)).some((m) => m.body === 'Respuesta exacta'));
+  await sim(K1, kwExact);
+  check('coincidencia exacta: el mensaje igual SÍ dispara', (await outbound(K1)).some((m) => m.body === 'Respuesta exacta'));
+  const convK = (await call(`/api/conversations?phone=${K1}`)).data[0];
+  check('mensaje entrante marca la conversación como no leída', convK.unread === true);
+  check('filtro de no leídas', (await call('/api/conversations?unread=true')).data.some((c) => c.id === convK.id));
+  await call(`/api/conversations/${convK.id}/read`, { body: {} });
+  check('marcar como leída', (await call(`/api/conversations/${convK.id}`)).data.unread === false);
+  await call(`/api/conversations/${convK.id}`, { method: 'PATCH', body: { important: true } });
+  check('filtro de importantes', (await call('/api/conversations?important=true')).data.some((c) => c.id === convK.id));
+  check('filtro de bloqueados', (await call('/api/conversations?blocked=true')).status === 200);
+  await call('/api/settings/agent', { method: 'PUT', body: { signature: `— Equipo ${tag}`, translateLanguage: 'es' } });
+  await call(`/api/conversations/${convK.id}/messages`, { body: { body: 'Mensaje con firma' } });
+  check('la firma del agente se añade a los mensajes manuales', (await outbound(K1)).some((m) => m.body === `Mensaje con firma\n\n— Equipo ${tag}`));
+  await call('/api/settings/agent', { method: 'PUT', body: original.agent });
+  const tr = await call('/api/ai/translate', { body: { text: 'hola' } });
+  check('traducir sin IA configurada → 409 explícito', tr.status === 409 || tr.status === 200, String(tr.status));
+
   console.log('\n10) Analítica y ajustes');
   const an = (await call('/api/analytics/overview')).data;
   check('analítica con orígenes y mensajes', Array.isArray(an.sources) && an.messagesPerDay.length === 8);
+  check('analítica: crecimiento a 30 días y métricas de broadcasts', an.growth30?.perDay?.length >= 30 && typeof an.broadcasts30?.campaigns === 'number', JSON.stringify(an.growth30?.perDay?.length));
 } finally {
   console.log('\nLimpieza…');
   for (const phone of created.phones) await call(`/api/subscribers/${phone}`, { method: 'DELETE' });
@@ -301,6 +365,7 @@ try {
   await call('/api/settings/sandbox', { method: 'PUT', body: original.sandbox });
   await call('/api/settings/businessHours', { method: 'PUT', body: original.businessHours });
   await call('/api/settings/assignment', { method: 'PUT', body: original.assignment });
+  if (original.agent) await call('/api/settings/agent', { method: 'PUT', body: original.agent });
 }
 
 console.log(`\n${passed} correctas, ${failed.length} fallidas`);

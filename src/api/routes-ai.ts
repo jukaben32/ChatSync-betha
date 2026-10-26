@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
-import { analyzeSubscriber, agentReady, rewriteReply, suggestReply } from '../ai/agent.js';
+import { analyzeSubscriber, agentReady, rewriteReply, suggestReply, translateText } from '../ai/agent.js';
+import { getSetting } from '../domain/settings.js';
 
 async function history(conversationId: string) {
   const rows = await prisma.message.findMany({ where: { conversationId }, orderBy: { createdAt: 'desc' }, take: 30 });
@@ -22,6 +23,19 @@ export async function aiRoutes(app: FastifyInstance) {
     if (blocked) return blocked;
     try {
       return { text: await rewriteReply(body.text.slice(0, 2000), body.tone) };
+    } catch (e) {
+      return reply.code(502).send({ error: 'ai_failed', message: (e as Error).message });
+    }
+  });
+
+  app.post('/api/ai/translate', async (request, reply) => {
+    const body = request.body as { text?: string; target?: string };
+    if (!body.text?.trim()) return reply.code(400).send({ error: 'text is required' });
+    const blocked = guard(reply);
+    if (blocked) return blocked;
+    try {
+      const target = body.target || (await getSetting('agent')).translateLanguage;
+      return { text: await translateText(body.text.slice(0, 2000), target), target };
     } catch (e) {
       return reply.code(502).send({ error: 'ai_failed', message: (e as Error).message });
     }

@@ -78,9 +78,9 @@ export async function automationRoutes(app: FastifyInstance) {
 
   // ---------- Sequences (drip) y Flows (chatbot) ----------
   app.get('/api/sequences', async (request) => {
-    const q = request.query as { kind?: string };
+    const q = request.query as { kind?: string; folder?: string };
     return prisma.sequence.findMany({
-      where: q.kind ? { kind: q.kind } : { kind: { not: 'internal' } },
+      where: { ...(q.kind ? { kind: q.kind } : { kind: { not: 'internal' } }), ...(q.folder ? { folder: q.folder } : {}) },
       include: { steps: { orderBy: { order: 'asc' } }, _count: { select: { enrollments: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -94,15 +94,17 @@ export async function automationRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/sequences', async (request, reply) => {
-    const body = request.body as { name?: string; kind?: string; triggerKeyword?: string; triggerLabel?: string; stopOnReply?: boolean; steps?: StepInput[] };
+    const body = request.body as { name?: string; kind?: string; triggerKeyword?: string; triggerLabel?: string; stopOnReply?: boolean; folder?: string; matchType?: string; steps?: StepInput[] };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
     const sequence = await prisma.sequence.create({
       data: {
         name: body.name,
-        kind: body.kind === 'flow' ? 'flow' : 'sequence',
+        kind: body.kind === 'flow' || body.kind === 'keyword' ? body.kind : 'sequence',
         triggerKeyword: body.triggerKeyword || null,
         triggerLabel: body.triggerLabel || null,
         stopOnReply: body.stopOnReply ?? true,
+        folder: body.folder?.trim() || null,
+        matchType: ['contains', 'exact', 'starts'].includes(body.matchType ?? '') ? body.matchType! : 'contains',
         steps: { create: stepData(body.steps ?? []) },
       },
       include: { steps: true },
@@ -112,7 +114,7 @@ export async function automationRoutes(app: FastifyInstance) {
 
   app.patch('/api/sequences/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { name?: string; active?: boolean; triggerKeyword?: string | null; triggerLabel?: string | null; stopOnReply?: boolean; steps?: StepInput[] };
+    const body = request.body as { name?: string; active?: boolean; triggerKeyword?: string | null; triggerLabel?: string | null; stopOnReply?: boolean; folder?: string | null; matchType?: string; steps?: StepInput[] };
     const exists = await prisma.sequence.findUnique({ where: { id } });
     if (!exists) return reply.code(404).send({ error: 'sequence_not_found' });
     if (body.steps) await prisma.sequenceStep.deleteMany({ where: { sequenceId: id } });
@@ -122,6 +124,8 @@ export async function automationRoutes(app: FastifyInstance) {
         name: body.name,
         active: body.active,
         stopOnReply: body.stopOnReply,
+        ...(body.folder !== undefined ? { folder: body.folder?.trim() || null } : {}),
+        ...(['contains', 'exact', 'starts'].includes(body.matchType ?? '') ? { matchType: body.matchType } : {}),
         ...(body.triggerLabel !== undefined ? { triggerLabel: body.triggerLabel || null } : {}),
         ...(body.triggerKeyword !== undefined ? { triggerKeyword: body.triggerKeyword || null } : {}),
         ...(body.steps ? { steps: { create: stepData(body.steps) } } : {}),
@@ -152,7 +156,7 @@ export async function automationRoutes(app: FastifyInstance) {
     try {
       const sequence = await prisma.sequence.findUnique({ where: { id } });
       if (!sequence) return reply.code(404).send({ error: 'sequence_not_found' });
-      return sequence.kind === 'flow'
+      return sequence.kind === 'flow' || sequence.kind === 'keyword'
         ? await triggerBotFlowForSubscriber({ phone: body.phone, flowId: id })
         : await triggerSequenceForSubscriber({ phone: body.phone, sequenceId: id });
     } catch (error) {

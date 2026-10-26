@@ -19,6 +19,16 @@ export interface InboundContext {
   mediaUrl?: string;
 }
 
+/** contains = el mensaje incluye la palabra · exact = el mensaje es exactamente la palabra · starts = empieza por ella */
+export function matchesKeyword(text: string, keyword: string | null, matchType: string) {
+  if (!keyword) return false;
+  const k = keyword.trim().toLowerCase();
+  const t = text.trim();
+  if (matchType === 'exact') return t === k;
+  if (matchType === 'starts') return t.startsWith(k);
+  return t.includes(k);
+}
+
 const STOP_WORDS = ['stop', 'baja', 'cancelar suscripcion', 'cancelar suscripción'];
 const OFF_HOURS_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
@@ -82,7 +92,7 @@ export async function handleInbound(params: InboundContext) {
   });
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: { updatedAt: new Date(), ...(reopened && !conversation.assignedTo ? { status: 'open' } : {}), followUpAt: null },
+    data: { updatedAt: new Date(), unread: true, ...(reopened && !conversation.assignedTo ? { status: 'open' } : {}), followUpAt: null },
   });
   await emitEvent('message.received', { name: subscriber.name, phone, message: body, type: messageType ?? 'text', conversationId: conversation.id });
   if (providerMessageId && whatsappConfigured()) await markWhatsAppRead(providerMessageId);
@@ -136,8 +146,8 @@ export async function handleInbound(params: InboundContext) {
   // 4) Flujo por palabra clave (en modo "fallback"; con IA en modo "all" la IA decide)
   const ai = await getSetting('ai');
   if (!(ai.mode === 'all' && agentReady())) {
-    const flows = await prisma.sequence.findMany({ where: { kind: 'flow', active: true, triggerKeyword: { not: null } }, include: { steps: true } });
-    const flow = flows.find((f) => f.triggerKeyword && text.includes(f.triggerKeyword.toLowerCase()));
+    const flows = await prisma.sequence.findMany({ where: { kind: { in: ['flow', 'keyword'] }, active: true, triggerKeyword: { not: null } }, include: { steps: true } });
+    const flow = flows.find((f) => matchesKeyword(text, f.triggerKeyword, f.matchType));
     if (flow) {
       await runFlow({ phone, flow: { id: flow.id, name: flow.name, steps: flow.steps as any }, message: body });
       return { subscriber, conversationId: conversation.id, handledBy: 'flow', flow: flow.name };
@@ -197,5 +207,9 @@ export async function handleStatusUpdate(params: { providerMessageId: string; st
 export async function handleOutbound(params: { conversationId: string; body: string; sender?: string }) {
   const conversation = await prisma.conversation.findUnique({ where: { id: params.conversationId }, include: { subscriber: true } });
   if (!conversation) throw new Error('conversation_not_found');
-  return sendMessage({ phone: conversation.subscriber.phone, content: { type: 'text', body: params.body }, conversationId: conversation.id, sender: params.sender ?? 'agent' });
+  const { signature } = await getSetting('agent');
+  const body = signature.trim() ? `${params.body}
+
+${signature.trim()}` : params.body;
+  return sendMessage({ phone: conversation.subscriber.phone, content: { type: 'text', body }, conversationId: conversation.id, sender: params.sender ?? 'agent' });
 }

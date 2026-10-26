@@ -25,6 +25,7 @@ interface Settings {
   ai: { mode: 'all' | 'fallback'; delaySeconds: number; escalateOnNegative: boolean; restrictedTopics: string; autoActions: boolean }
   assignment: { mode: 'manual' | 'round_robin' }
   sandbox: { enabled: boolean }
+  agent: { signature: string; translateLanguage: string }
 }
 
 const DAYS: [string, string][] = [
@@ -41,6 +42,7 @@ const TABS = [
   { id: 'connection', label: 'Conexión' },
   { id: 'hours', label: 'Horario comercial' },
   { id: 'ai', label: 'IA y asignación' },
+  { id: 'agent', label: 'Mi cuenta' },
   { id: 'data', label: 'Campos y respuestas rápidas' },
   { id: 'test', label: 'Consola de pruebas' },
 ]
@@ -80,6 +82,7 @@ export default function SettingsPage() {
       {tab === 'connection' && <Connection account={account.data} settings={settings.data} onSandbox={(enabled) => save('sandbox', { enabled })} />}
       {tab === 'hours' && settings.data && <Hours value={settings.data.businessHours} onSave={(v) => save('businessHours', v)} />}
       {tab === 'ai' && settings.data && <AiAssignment ai={settings.data.ai} assignment={settings.data.assignment} aiReady={account.data?.ai.ready ?? false} onAi={(v) => save('ai', v)} onAssignment={(v) => save('assignment', v)} />}
+      {tab === 'agent' && settings.data && <AgentTab value={settings.data.agent} onSave={(v) => save('agent', v)} />}
       {tab === 'data' && <DataTab />}
       {tab === 'test' && <TestConsole sandbox={settings.data?.sandbox.enabled ?? false} />}
     </Page>
@@ -438,6 +441,48 @@ function TestConsole({ sandbox }: { sandbox: boolean }) {
           ))}
         </ul>
       )}
+    </Card>
+  )
+}
+
+const LANGS: [string, string][] = [
+  ['es', 'Español'],
+  ['en', 'Inglés'],
+  ['pt', 'Portugués'],
+  ['fr', 'Francés'],
+  ['it', 'Italiano'],
+  ['de', 'Alemán'],
+  ['ar', 'Árabe'],
+  ['hi', 'Hindi'],
+]
+
+function AgentTab({ value, onSave }: { value: Settings['agent']; onSave: (v: Settings['agent']) => Promise<void> }) {
+  const [v, setV] = useState(value)
+  const [saved, setSaved] = useState(false)
+  return (
+    <Card title="Mensajes del equipo" actions={saved ? <Badge tone="green">Guardado</Badge> : undefined}>
+      <Field label="Firma" hint="Se añade al final de cada mensaje que envía una persona desde la bandeja (no a los del bot ni la IA). Déjala vacía para no usar firma.">
+        <textarea style={{ minHeight: 70 }} value={v.signature} onChange={(e) => setV({ ...v, signature: e.target.value })} placeholder="— Equipo de Atención" />
+      </Field>
+      <Field label="Idioma de traducción en la bandeja" hint="El botón «Traducir» de cada mensaje del cliente lo traduce a este idioma (requiere la IA activa).">
+        <select style={{ maxWidth: 260 }} value={v.translateLanguage} onChange={(e) => setV({ ...v, translateLanguage: e.target.value })}>
+          {LANGS.map(([k, label]) => (
+            <option key={k} value={k}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <button
+        className="btn btn-primary"
+        onClick={async () => {
+          await onSave(v)
+          setSaved(true)
+          setTimeout(() => setSaved(false), 1500)
+        }}
+      >
+        Guardar
+      </button>
     </Card>
   )
 }

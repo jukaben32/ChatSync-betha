@@ -12,27 +12,26 @@ import { hookRoutes } from './routes-hooks.js';
 import { aiRoutes } from './routes-ai.js';
 import { mcpRoutes } from './routes-mcp.js';
 import { v1Routes } from './routes-v1.js';
+import { contactRoutes } from './routes-contacts.js';
+import { subscriberWhere } from '../domain/subscriber-filters.js';
 
-const subscriberInclude = { labels: { include: { label: true } }, _count: { select: { conversations: true } } } as const;
+const subscriberInclude = {
+  labels: { include: { label: true } },
+  lists: { include: { list: true } },
+  _count: { select: { conversations: true } },
+} as const;
 
 export async function apiRoutes(app: FastifyInstance) {
   app.get('/api/health', async () => ({ ok: true, service: 'chatsyncs-replica' }));
 
   // ---------- Subscribers ----------
   app.get('/api/subscribers', async (request) => {
-    const q = request.query as { q?: string; label?: string; take?: string; skip?: string };
-    const where: any = {};
-    if (q.q) {
-      where.OR = [
-        { phone: { contains: q.q } },
-        { name: { contains: q.q, mode: 'insensitive' } },
-        { email: { contains: q.q, mode: 'insensitive' } },
-      ];
-    }
-    if (q.label) where.labels = { some: { label: { name: q.label } } };
+    const q = request.query as { q?: string; label?: string; list?: string; sequence?: string; status?: string; sort?: string; take?: string; skip?: string };
+    const where = subscriberWhere(q);
     const take = Math.min(Number(q.take ?? 100), 500);
+    const orderBy = q.sort === 'oldest' ? { createdAt: 'asc' as const } : q.sort === 'name' ? { name: 'asc' as const } : { createdAt: 'desc' as const };
     const [items, total] = await Promise.all([
-      prisma.subscriber.findMany({ where, include: subscriberInclude, orderBy: { createdAt: 'desc' }, take, skip: Number(q.skip ?? 0) }),
+      prisma.subscriber.findMany({ where, include: subscriberInclude, orderBy, take, skip: Number(q.skip ?? 0) }),
       prisma.subscriber.count({ where }),
     ]);
     return { items, total };
@@ -54,8 +53,10 @@ export async function apiRoutes(app: FastifyInstance) {
 
   // Importación masiva (CSV parseado en el cliente): [{ phone, name?, email?, labels? }]
   app.post('/api/subscribers/import', async (request, reply) => {
-    const body = request.body as { rows?: Array<{ phone?: string; name?: string; email?: string; labels?: string[] }> };
+    const body = request.body as { rows?: Array<{ phone?: string; name?: string; email?: string; labels?: string[] }>; list?: string };
     if (!body.rows?.length) return reply.code(400).send({ error: 'rows is required' });
+    // Todos los contactos importados se añaden a esta lista (se crea si no existe)
+    const importList = body.list?.trim() ? await prisma.audienceList.upsert({ where: { name: body.list.trim() }, update: {}, create: { name: body.list.trim() } }) : null;
     let created = 0;
     let updated = 0;
     let skipped = 0;
@@ -72,6 +73,13 @@ export async function apiRoutes(app: FastifyInstance) {
         create: { phone, name: row.name || undefined, email: row.email || undefined, source: 'import' },
       });
       existing ? (updated += 1) : (created += 1);
+      if (importList) {
+        await prisma.audienceListMember.upsert({
+          where: { listId_subscriberId: { listId: importList.id, subscriberId: subscriber.id } },
+          update: {},
+          create: { listId: importList.id, subscriberId: subscriber.id },
+        });
+      }
       for (const name of row.labels ?? []) {
         if (!name) continue;
         const label = await prisma.label.upsert({ where: { name }, update: {}, create: { name } });
@@ -91,6 +99,9 @@ export async function apiRoutes(app: FastifyInstance) {
       where: { phone },
       include: {
         labels: { include: { label: true } },
+        lists: { include: { list: true } },
+        sequences: { include: { sequence: { select: { id: true, name: true } } } },
+        flowSessions: { where: { status: 'active' }, include: { sequence: { select: { name: true } } } },
         conversations: { include: { messages: { orderBy: { createdAt: 'asc' }, take: 100 } } },
         notes: { orderBy: { createdAt: 'desc' } },
         deals: true,
@@ -193,14 +204,19 @@ export async function apiRoutes(app: FastifyInstance) {
 
   // ---------- Conversations (shared inbox) ----------
   app.get('/api/conversations', async (request) => {
-    const q = request.query as { phone?: string; status?: string; assignedTo?: string; q?: string; followUp?: string };
+    const q = request.query as { phone?: string; status?: string; assignedTo?: string; q?: string; followUp?: string; unread?: string; important?: string; blocked?: string };
     const where: any = {};
-    if (q.phone) where.subscriber = { phone: q.phone };
+    const subscriberFilters: any[] = [];
+    if (q.phone) subscriberFilters.push({ phone: q.phone });
+    if (q.q) subscriberFilters.push({ OR: [{ phone: { contains: q.q } }, { name: { contains: q.q, mode: 'insensitive' } }] });
+    if (q.blocked === 'true') subscriberFilters.push({ blocked: true });
+    if (subscriberFilters.length) where.subscriber = { AND: subscriberFilters };
     if (q.status) where.status = q.status;
+    if (q.unread === 'true') where.unread = true;
+    if (q.important === 'true') where.important = true;
     if (q.followUp === 'due') where.followUpAt = { lte: new Date() };
     if (q.assignedTo === 'unassigned') where.assignedTo = null;
     else if (q.assignedTo) where.assignedTo = q.assignedTo;
-    if (q.q) where.subscriber = { OR: [{ phone: { contains: q.q } }, { name: { contains: q.q, mode: 'insensitive' } }] };
     return prisma.conversation.findMany({
       where,
       include: { subscriber: true, messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
@@ -249,6 +265,14 @@ export async function apiRoutes(app: FastifyInstance) {
     }
   });
 
+  // El agente abrió la conversación: ya no está «sin leer»
+  app.post('/api/conversations/:id/read', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = await prisma.conversation.updateMany({ where: { id }, data: { unread: false } });
+    if (!result.count) return reply.code(404).send({ error: 'conversation_not_found' });
+    return { ok: true };
+  });
+
   app.post('/api/conversations/:id/notes', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as { author?: string; body?: string };
@@ -261,13 +285,15 @@ export async function apiRoutes(app: FastifyInstance) {
 
   app.patch('/api/conversations/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { status?: string; assignedTo?: string | null; followUpAt?: string | null };
+    const body = request.body as { status?: string; assignedTo?: string | null; followUpAt?: string | null; important?: boolean; unread?: boolean };
     const current = await prisma.conversation.findUnique({ where: { id } });
     if (!current) return reply.code(404).send({ error: 'conversation_not_found' });
     const conversation = await prisma.conversation.update({
       where: { id },
       data: {
         ...(body.status ? { status: body.status } : {}),
+        ...(body.important !== undefined ? { important: body.important } : {}),
+        ...(body.unread !== undefined ? { unread: body.unread } : {}),
         ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo || null } : {}),
         ...(body.followUpAt !== undefined ? { followUpAt: body.followUpAt ? new Date(body.followUpAt) : null } : {}),
       },
@@ -329,5 +355,6 @@ export async function apiRoutes(app: FastifyInstance) {
   await app.register(aiRoutes);
   await app.register(mcpRoutes);
   await app.register(v1Routes);
+  await app.register(contactRoutes);
   await app.register(settingsRoutes);
 }

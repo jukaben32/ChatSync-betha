@@ -23,6 +23,7 @@ model Subscriber {
   broadcastRecipients BroadcastRecipient[]
   jobs           ScheduledJob[]
   flowSessions   FlowSession[]
+  lists          AudienceListMember[]
   blocked        Boolean  @default(false)
   optedOut       Boolean  @default(false)
   source         String?  @db.VarChar(64)
@@ -57,6 +58,8 @@ model Conversation {
   status        String        @default("open") @db.VarChar(32)
   assignedTo    String?       @db.VarChar(64)
   followUpAt    DateTime?     @db.Timestamptz
+  unread        Boolean       @default(false)
+  important     Boolean       @default(false)
   channel       String        @default("whatsapp") @db.VarChar(32)
   messages      Message[]
   notes         SubscriberNote[]
@@ -102,6 +105,8 @@ model Sequence {
   jobs        ScheduledJob[]
   flowSessions FlowSession[]
   stopOnReply Boolean            @default(true)
+  folder      String?            @db.VarChar(64)
+  matchType   String             @default("contains") @db.VarChar(16) // contains | exact | starts
   triggerLabel String?           @db.VarChar(128)
   steps      SequenceStep[]
   enrollments SubscriberSequence[]
@@ -315,4 +320,22 @@ model ApiLog {
   createdAt DateTime @default(now()) @db.Timestamptz
 
   @@index([createdAt])
+}
+
+model AudienceList {
+  id        String               @id @default(uuid()) @db.Uuid
+  name      String               @unique @db.VarChar(255)
+  members   AudienceListMember[]
+  createdAt DateTime             @default(now()) @db.Timestamptz
+}
+
+model AudienceListMember {
+  listId       String       @db.Uuid
+  list         AudienceList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  subscriberId String       @db.Uuid
+  subscriber   Subscriber   @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  addedAt      DateTime     @default(now()) @db.Timestamptz
+
+  @@id([listId, subscriberId])
+  @@index([subscriberId])
 }

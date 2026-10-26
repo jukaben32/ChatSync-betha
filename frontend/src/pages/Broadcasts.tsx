@@ -132,11 +132,13 @@ interface FieldFilter {
 
 function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const labels = useAsync(() => api<Label[]>('/api/labels'))
+  const lists = useAsync(() => api<{ id: string; name: string; _count?: { members: number } }[]>('/api/lists'))
   const templates = useAsync(() => api<Template[]>('/api/templates'))
   const [form, setForm] = useState({ name: '', contentType: 'text', content: '', language: 'es', mediaUrl: '' })
   const [buttons, setButtons] = useState<string[]>([])
   const [include, setInclude] = useState<string[]>([])
   const [exclude, setExclude] = useState<string[]>([])
+  const [inLists, setInLists] = useState<string[]>([])
   const [filters, setFilters] = useState<FieldFilter[]>([])
   const [when, setWhen] = useState('')
   const [count, setCount] = useState<number | null>(null)
@@ -145,8 +147,9 @@ function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const audience = {
     ...(include.length ? { labels: include } : {}),
     ...(exclude.length ? { excludeLabels: exclude } : {}),
+    ...(inLists.length ? { lists: inLists } : {}),
     ...(filters.length ? { fields: filters.filter((f) => f.field) } : {}),
-    ...(!include.length && !exclude.length && !filters.length ? { all: true } : {}),
+    ...(!include.length && !exclude.length && !filters.length && !inLists.length ? { all: true } : {}),
   }
 
   // Vista previa: cuántos contactos recibirían el envío
@@ -270,6 +273,20 @@ function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () =
       <h3 style={{ margin: '4px 0 8px' }}>Audiencia</h3>
       <Field label="Incluir contactos con alguna de estas etiquetas">{chips(include, setInclude, 'badge-green')}</Field>
       <Field label="Excluir contactos con estas etiquetas">{chips(exclude, setExclude, 'badge-red')}</Field>
+      <Field label="Solo contactos de estas listas">
+        <div className="chips">
+          {lists.data?.map((l) => {
+            const on = inLists.includes(l.name)
+            return (
+              <button key={l.id} type="button" className={`badge ${on ? 'badge-blue' : 'badge-gray'}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => toggle(inLists, setInLists, l.name)}>
+                {on ? '✓ ' : ''}
+                {l.name} · {l._count?.members ?? 0}
+              </button>
+            )
+          })}
+          {lists.data?.length === 0 && <span className="muted">Aún no hay listas.</span>}
+        </div>
+      </Field>
       <Field label="Filtrar por campos personalizados">
         <div className="grid" style={{ gap: 6 }}>
           {filters.map((f, i) => (

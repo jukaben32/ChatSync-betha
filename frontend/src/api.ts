@@ -98,9 +98,11 @@ export interface Step {
 export interface Sequence {
   id: string
   name: string
-  kind: 'sequence' | 'flow'
+  kind: 'sequence' | 'flow' | 'keyword'
   triggerKeyword: string | null
   triggerLabel?: string | null
+  folder?: string | null
+  matchType?: string
   stopOnReply?: boolean
   active: boolean
   steps: Step[]

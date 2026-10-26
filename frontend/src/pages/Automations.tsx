@@ -101,7 +101,8 @@ function summary(s: { action: string; params: Record<string, any>; delayDays?: n
 }
 
 export default function Automations() {
-  const [tab, setTab] = useState<'sequence' | 'flow'>('flow')
+  const [tab, setTab] = useState<'sequence' | 'flow' | 'keyword'>('keyword')
+  const [folder, setFolder] = useState('')
   const list = useAsync(() => api<Sequence[]>(`/api/sequences?kind=${tab}`), [tab])
   const [editing, setEditing] = useState<Sequence | 'new' | null>(null)
   const [running, setRunning] = useState<Sequence | null>(null)
@@ -122,11 +123,14 @@ export default function Automations() {
       subtitle="Chatbots con preguntas y ramas, y campañas de goteo (drip)"
       actions={
         <button className="btn btn-primary" onClick={() => setEditing('new')}>
-          + {tab === 'flow' ? 'Nuevo flujo' : 'Nueva secuencia'}
+          + {tab === 'keyword' ? 'Nueva respuesta' : tab === 'flow' ? 'Nuevo flujo' : 'Nueva secuencia'}
         </button>
       }
     >
       <div className="tabs">
+        <button className={`tab ${tab === 'keyword' ? 'active' : ''}`} onClick={() => setTab('keyword')}>
+          Respuestas por palabra clave
+        </button>
         <button className={`tab ${tab === 'flow' ? 'active' : ''}`} onClick={() => setTab('flow')}>
           Flujos de chatbot
         </button>
@@ -135,17 +139,32 @@ export default function Automations() {
         </button>
       </div>
       <ErrorNote message={list.error} />
+      {tab === 'keyword' && (list.data ?? []).some((x) => x.folder) && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <span className="muted">Carpeta:</span>
+          <select style={{ width: 200 }} value={folder} onChange={(e) => setFolder(e.target.value)} aria-label="Carpeta">
+            <option value="">Todas</option>
+            {[...new Set((list.data ?? []).map((x) => x.folder).filter(Boolean))].map((f) => (
+              <option key={f as string} value={f as string}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {list.data?.length === 0 ? (
         <Card>
           <Empty>
-            {tab === 'flow'
+            {tab === 'keyword'
+              ? 'Aún no hay respuestas. Una respuesta por palabra clave contesta automáticamente cuando el mensaje del cliente coincide con la palabra.'
+              : tab === 'flow'
               ? 'Aún no hay flujos. Un flujo se dispara cuando un cliente escribe su palabra clave y puede preguntar, ramificar y guardar datos.'
               : 'Aún no hay secuencias. Una secuencia envía mensajes escalonados en el tiempo y se detiene sola cuando el cliente responde.'}
           </Empty>
         </Card>
       ) : (
         <div className="grid grid-2">
-          {list.data?.map((s) => (
+          {list.data?.filter((x) => !folder || x.folder === folder).map((s) => (
             <Card
               key={s.id}
               title={s.name}
@@ -156,7 +175,9 @@ export default function Automations() {
               }
             >
               <div className="row" style={{ marginBottom: 8 }}>
-                {s.kind === 'flow' && <Badge tone="blue">Palabra clave: {s.triggerKeyword || '—'}</Badge>}
+                {(s.kind === 'flow' || s.kind === 'keyword') && <Badge tone="blue">Palabra clave: {s.triggerKeyword || '—'}</Badge>}
+                {s.kind === 'keyword' && <Badge>{s.matchType === 'exact' ? 'Coincidencia exacta' : s.matchType === 'starts' ? 'Empieza por' : 'Contiene'}</Badge>}
+                {s.folder && <Badge tone="amber">📁 {s.folder}</Badge>}
                 {s.kind === 'sequence' && s.triggerLabel && <Badge tone="blue">Etiqueta: {s.triggerLabel}</Badge>}
                 <Badge>{s.steps.length} pasos</Badge>
                 {s.kind === 'sequence' && <Badge tone="green">{s._count?.enrollments ?? 0} inscritos</Badge>}
@@ -186,7 +207,17 @@ export default function Automations() {
           ))}
         </div>
       )}
-      {editing && (
+      {editing && tab === 'keyword' && (
+        <KeywordEditor
+          initial={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null)
+            list.reload()
+          }}
+        />
+      )}
+      {editing && tab !== 'keyword' && (
         <Editor
           kind={tab}
           initial={editing === 'new' ? null : editing}
@@ -612,6 +643,75 @@ function RunModal({ sequence, onClose }: { sequence: Sequence; onClose: () => vo
       {result && <div className="ok-note">{result}</div>}
       <Field label="Teléfono del contacto" hint="El contacto debe existir en Contactos.">
         <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" autoFocus />
+      </Field>
+    </Modal>
+  )
+}
+
+function KeywordEditor({ initial, onClose, onSaved }: { initial: Sequence | null; onClose: () => void; onSaved: () => void }) {
+  const sorted = [...(initial?.steps ?? [])].sort((a, b) => a.order - b.order)
+  const [name, setName] = useState(initial?.name ?? '')
+  const [keyword, setKeyword] = useState(initial?.triggerKeyword ?? '')
+  const [matchType, setMatchType] = useState(initial?.matchType ?? 'contains')
+  const [folder, setFolder] = useState(initial?.folder ?? '')
+  const [reply, setReply] = useState(String(sorted.find((s) => s.action === 'send_text')?.params.body ?? ''))
+  const [label, setLabel] = useState(String(sorted.find((s) => s.action === 'add_label')?.params.label ?? ''))
+  const [error, setError] = useState('')
+
+  async function save() {
+    const steps: { action: string; params: Record<string, unknown>; delayDays: number; order: number }[] = [{ action: 'send_text', params: { body: reply }, delayDays: 0, order: 0 }]
+    if (label.trim()) steps.push({ action: 'add_label', params: { label: label.trim() }, delayDays: 0, order: 1 })
+    const payload = { name: name.trim() || keyword.trim(), kind: 'keyword', triggerKeyword: keyword.trim(), matchType, folder: folder.trim() || null, steps }
+    try {
+      if (initial) await api(`/api/sequences/${initial.id}`, { method: 'PATCH', body: payload })
+      else await api('/api/sequences', { body: payload })
+      onSaved()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  return (
+    <Modal
+      title={initial ? 'Editar respuesta' : 'Nueva respuesta por palabra clave'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancelar
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={!keyword.trim() || !reply.trim()}>
+            Guardar
+          </button>
+        </>
+      }
+    >
+      <ErrorNote message={error} />
+      <div className="grid grid-2">
+        <Field label="Palabra clave">
+          <input value={keyword} onChange={(e) => setKeyword(e.target.value)} autoFocus />
+        </Field>
+        <Field label="Coincidencia">
+          <select value={matchType} onChange={(e) => setMatchType(e.target.value)}>
+            <option value="contains">El mensaje contiene la palabra</option>
+            <option value="exact">El mensaje es exactamente la palabra</option>
+            <option value="starts">El mensaje empieza por la palabra</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Respuesta" hint="Variables: {{name}}, {{phone}}, {{campo}}. Fuera de la ventana de 24 h WhatsApp solo admite plantillas.">
+        <textarea value={reply} onChange={(e) => setReply(e.target.value)} />
+      </Field>
+      <div className="grid grid-2">
+        <Field label="Nombre interno (opcional)">
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Carpeta (opcional)">
+          <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="p. ej. Ventas" />
+        </Field>
+      </div>
+      <Field label="Etiqueta que se añade al contacto (opcional)">
+        <input value={label} onChange={(e) => setLabel(e.target.value)} />
       </Field>
     </Modal>
   )

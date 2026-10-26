@@ -17,6 +17,7 @@ export interface Audience {
   all?: boolean;
   labels?: string[];
   excludeLabels?: string[];
+  lists?: string[];
   fields?: FieldFilter[];
 }
 
@@ -43,6 +44,7 @@ export async function resolveAudience(audience: Audience) {
       blocked: false,
       optedOut: false,
       ...(audience.labels?.length ? { labels: { some: { label: { name: { in: audience.labels } } } } } : {}),
+      ...(audience.lists?.length ? { lists: { some: { list: { name: { in: audience.lists } } } } } : {}),
       ...(audience.excludeLabels?.length ? { NOT: { labels: { some: { label: { name: { in: audience.excludeLabels } } } } } } : {}),
     },
   });

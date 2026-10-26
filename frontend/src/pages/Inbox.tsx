@@ -23,7 +23,7 @@ interface Insights {
   nextBestAction: string
 }
 
-type ConvDetail = Conversation & { windowOpen?: boolean; followUpAt?: string | null }
+type ConvDetail = Conversation & { windowOpen?: boolean; followUpAt?: string | null; important?: boolean; unread?: boolean }
 
 const STATUS: Record<string, { label: string; tone: 'green' | 'amber' | 'gray' }> = {
   open: { label: 'Abierta', tone: 'green' },
@@ -34,16 +34,33 @@ const STATUS: Record<string, { label: string; tone: 'green' | 'amber' | 'gray' }
 
 const TABS = [
   { id: 'open', label: 'Abiertas' },
-  { id: 'mine', label: 'Sin asignar' },
+  { id: 'mine', label: 'Mías' },
+  { id: 'unassigned', label: 'Sin asignar' },
+  { id: 'unread', label: 'No leídas' },
+  { id: 'important', label: 'Importantes' },
   { id: 'followup', label: 'Seguimiento' },
   { id: 'solved', label: 'Resueltas' },
   { id: 'archived', label: 'Archivadas' },
+  { id: 'blocked', label: 'Bloqueados' },
 ]
 
-function queryFor(tab: string, search: string) {
+const ME_KEY = 'chatsyncs_me'
+const readMe = () => {
+  try {
+    return localStorage.getItem(ME_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function queryFor(tab: string, search: string, me: string) {
   const p = new URLSearchParams()
   if (tab === 'open') p.set('status', 'open')
-  if (tab === 'mine') p.set('assignedTo', 'unassigned')
+  if (tab === 'mine') p.set('assignedTo', me || '__nadie__')
+  if (tab === 'unassigned') p.set('assignedTo', 'unassigned')
+  if (tab === 'unread') p.set('unread', 'true')
+  if (tab === 'important') p.set('important', 'true')
+  if (tab === 'blocked') p.set('blocked', 'true')
   if (tab === 'followup') p.set('followUp', 'due')
   if (tab === 'solved') p.set('status', 'solved')
   if (tab === 'archived') p.set('status', 'archived')
@@ -55,8 +72,9 @@ export default function Inbox() {
   const [tab, setTab] = useState('open')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
+  const [me, setMe] = useState(readMe)
 
-  const list = useAsync(() => api<Conversation[]>(`/api/conversations?${queryFor(tab, search)}`), [tab, search])
+  const list = useAsync(() => api<Conversation[]>(`/api/conversations?${queryFor(tab, search, me)}`), [tab, search, me])
   const team = useAsync(() => api<Member[]>('/api/team'))
   const canned = useAsync(() => api<Canned[]>('/api/canned-responses'))
 
@@ -81,6 +99,29 @@ export default function Inbox() {
             ))}
           </div>
         </div>
+        {tab === 'mine' && (
+          <div style={{ padding: '0 12px 8px' }}>
+            <select
+              value={me}
+              onChange={(e) => {
+                setMe(e.target.value)
+                try {
+                  localStorage.setItem(ME_KEY, e.target.value)
+                } catch {
+                  /* almacenamiento no disponible */
+                }
+              }}
+              aria-label="Soy"
+            >
+              <option value="">¿Quién eres?</option>
+              {team.data?.map((m) => (
+                <option key={m.id} value={m.name}>
+                  Soy {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <ErrorNote message={list.error} />
         {list.data?.length === 0 && <div className="empty">Sin conversaciones en esta vista.</div>}
         {list.data?.map((c) => (
@@ -88,7 +129,11 @@ export default function Inbox() {
             <Avatar text={initials(c.subscriber.name, c.subscriber.phone)} />
             <div className="grow">
               <div className="row" style={{ justifyContent: 'space-between' }}>
-                <strong>{c.subscriber.name || c.subscriber.phone}</strong>
+                <strong>
+                  {(c as Conversation & { unread?: boolean }).unread && <span className="dot" style={{ background: 'var(--brand)' }} title="Sin leer" />}
+                  {c.subscriber.name || c.subscriber.phone}
+                  {(c as Conversation & { important?: boolean }).important && ' ⭐'}
+                </strong>
                 <small className="muted">{timeAgo(c.updatedAt)}</small>
               </div>
               <div className="conv-preview">{c.messages[0]?.body || '—'}</div>
@@ -121,7 +166,17 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
   const [busyAi, setBusyAi] = useState(false)
   const [error, setError] = useState('')
   const [media, setMedia] = useState(false)
+  const [mode, setMode] = useState<'reply' | 'note'>('reply')
+  const [translations, setTranslations] = useState<Record<string, string>>({})
   const bottom = useRef<HTMLDivElement>(null)
+
+  // Abrir la conversación la marca como leída
+  useEffect(() => {
+    api(`/api/conversations/${id}/read`, { body: {} })
+      .then(onChanged)
+      .catch(() => undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -163,10 +218,26 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
 
   async function send() {
     if (!text.trim()) return
+    if (mode === 'note') {
+      await api(`/api/conversations/${id}/notes`, { body: { body: text.trim(), author: 'agente' } })
+      setText('')
+      conv.reload()
+      return
+    }
     if (await post({ body: text.trim() })) setText('')
   }
 
-  async function patch(body: { status?: string; assignedTo?: string | null; followUpAt?: string | null }) {
+  async function translate(messageId: string, body: string) {
+    setTranslations((t) => ({ ...t, [messageId]: '…' }))
+    try {
+      const r = await api<{ text: string }>('/api/ai/translate', { body: { text: body } })
+      setTranslations((t) => ({ ...t, [messageId]: r.text }))
+    } catch (e) {
+      setTranslations((t) => ({ ...t, [messageId]: (e as Error).message.includes('AI_API_KEY') ? 'La IA no está activa (falta AI_API_KEY).' : (e as Error).message }))
+    }
+  }
+
+  async function patch(body: { status?: string; assignedTo?: string | null; followUpAt?: string | null; important?: boolean }) {
     await api(`/api/conversations/${id}`, { method: 'PATCH', body })
     conv.reload()
     onChanged()
@@ -205,6 +276,9 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
             +{c.subscriber.phone} {c.subscriber.source && c.subscriber.source !== 'whatsapp' && <Badge tone="blue">{c.subscriber.source}</Badge>}
           </div>
         </div>
+        <button className="icon-btn" title={c.important ? 'Quitar de importantes' : 'Marcar como importante'} aria-label="Importante" onClick={() => patch({ important: !c.important })}>
+          {c.important ? '⭐' : '☆'}
+        </button>
         <select value={c.assignedTo ?? ''} onChange={(e) => patch({ assignedTo: e.target.value || null })} style={{ width: 150 }} aria-label="Asignar a">
           <option value="">Bot / sin asignar</option>
           {c.assignedTo && !members.some((m) => m.name === c.assignedTo) && <option value={c.assignedTo}>{c.assignedTo}</option>}
@@ -243,6 +317,19 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
         {c.messages.map((m) => (
           <div key={m.id} className={`bubble ${m.direction === 'outbound' ? 'out' : ''} ${m.status === 'failed' ? 'failed' : ''}`}>
             {m.body}
+            {m.direction === 'inbound' && m.body && (
+              <div>
+                {translations[m.id] ? (
+                  <div className="muted" style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
+                    {translations[m.id]}
+                  </div>
+                ) : (
+                  <button className="icon-btn" style={{ padding: '0 4px', fontSize: 12 }} onClick={() => translate(m.id, m.body)}>
+                    🌐 Traducir
+                  </button>
+                )}
+              </div>
+            )}
             <small>
               {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               {m.direction === 'outbound' &&
@@ -261,7 +348,15 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
           </div>
         )}
         <ErrorNote message={error} />
-        {matches.length > 0 && (
+        <div className="row" style={{ marginBottom: 6, gap: 4 }}>
+          <button className={`badge ${mode === 'reply' ? 'badge-green' : 'badge-gray'}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setMode('reply')}>
+            Responder
+          </button>
+          <button className={`badge ${mode === 'note' ? 'badge-amber' : 'badge-gray'}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setMode('note')}>
+            Nota interna
+          </button>
+        </div>
+        {matches.length > 0 && mode === 'reply' && (
           <div className="deal" style={{ marginBottom: 8 }}>
             {matches.map((r) => (
               <button key={r.id} className="conv" style={{ padding: 8, border: 0 }} onClick={() => setText(r.body.replace('{{name}}', c.subscriber.name ?? ''))}>
@@ -274,7 +369,7 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
         <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'nowrap' }}>
           <textarea
             className="grow"
-            placeholder="Escribe un mensaje… (/ para respuestas rápidas · Ctrl+Enter para enviar)"
+            placeholder={mode === 'note' ? 'Nota interna (el cliente no la ve)…' : 'Escribe un mensaje… (/ para respuestas rápidas · Ctrl+Enter para enviar)'}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -283,11 +378,11 @@ function Chat({ id, members, canned, onBack, onChanged }: { id: string; members:
           />
           <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
             <button className="btn btn-primary" onClick={send} disabled={sending || !text.trim()}>
-              Enviar
+              {mode === 'note' ? 'Guardar nota' : 'Enviar'}
             </button>
           </div>
         </div>
-        <div className="row" style={{ marginTop: 6 }}>
+        <div className="row" style={{ marginTop: 6, display: mode === 'note' ? 'none' : undefined }}>
           <button className="btn btn-sm" onClick={() => ai('suggest')} disabled={busyAi}>
             ✦ Sugerir respuesta
           </button>

@@ -29,6 +29,13 @@ export interface AiSettings {
   autoActions: boolean;
 }
 
+export interface AgentSettings {
+  /** Texto que se añade al final de los mensajes que envían las personas del equipo. */
+  signature: string;
+  /** Idioma al que se traducen los mensajes del cliente en la bandeja (código ISO, p. ej. "es"). */
+  translateLanguage: string;
+}
+
 export interface SandboxSettings {
   /** Modo simulación: sin WhatsApp configurado, los mensajes se guardan como enviados sin llamar a Meta. */
   enabled: boolean;
@@ -40,7 +47,7 @@ export interface AssignmentSettings {
 
 const DEFAULT_DAY: DayHours = { enabled: true, start: '09:00', end: '18:00' };
 
-export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignment: AssignmentSettings; sandbox: SandboxSettings } = {
+export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignment: AssignmentSettings; sandbox: SandboxSettings; agent: AgentSettings } = {
   businessHours: {
     enabled: false,
     timezone: 'America/Santo_Domingo',
@@ -59,6 +66,7 @@ export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignmen
   ai: { mode: 'fallback', delaySeconds: 0, escalateOnNegative: true, restrictedTopics: '', autoActions: true },
   assignment: { mode: 'manual' },
   sandbox: { enabled: false },
+  agent: { signature: '', translateLanguage: 'es' },
 };
 
 export type SettingKey = keyof typeof DEFAULTS;

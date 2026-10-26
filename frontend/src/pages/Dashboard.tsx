@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { api } from '../api'
-import { Card, ErrorNote, Page, useAsync } from '../ui'
+import { Badge, Card, ErrorNote, Page, useAsync } from '../ui'
 
 interface Overview {
   subscribers: number
@@ -10,12 +10,22 @@ interface Overview {
   broadcasts: { total: number; sent: number; delivered: number; read: number; failed: number; deliveryRate: number; readRate: number }
   deals: { stage: string; count: number; value: number }[]
   labels: { name: string; subscribers: number }[]
+  growth30?: { joined: number; left: number; perDay: { date: string; count: number }[] }
+  broadcasts30?: { campaigns: number; completed: number; messagesSent: number; failed: number; avgOpenRate: number }
 }
 
 interface Account {
   whatsapp: { configured: boolean }
-  ai: { ready: boolean }
+  ai: { ready: boolean; model?: string }
 }
+
+const QUICK: { to: string; icon: string; title: string; hint: string }[] = [
+  { to: '/broadcasts', icon: '📣', title: 'Nuevo broadcast', hint: 'Enviar a tu audiencia' },
+  { to: '/inbox', icon: '💬', title: 'Abrir bandeja', hint: 'Ver conversaciones' },
+  { to: '/automations', icon: '⚡', title: 'Crear flujo', hint: 'Construir automatización' },
+  { to: '/ai', icon: '✦', title: 'Entrenar IA', hint: 'Mejorar sus respuestas' },
+  { to: '/settings', icon: '🔌', title: 'Conectar canal', hint: 'WhatsApp Cloud API' },
+]
 
 function Stat({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
   return (
@@ -29,8 +39,8 @@ function Stat({ label, value, hint }: { label: string; value: string | number; h
 
 export default function Dashboard() {
   const { data, error, loading } = useAsync(async () => {
-    const [overview, account] = await Promise.all([api<Overview>('/api/analytics/overview'), api<Account>('/api/account')])
-    return { overview, account }
+    const [overview, account, knowledge] = await Promise.all([api<Overview>('/api/analytics/overview'), api<Account>('/api/account'), api<unknown[]>('/api/knowledge')])
+    return { overview, account, knowledge: knowledge.length }
   })
 
   if (loading && !data) return <Page title="Panel">Cargando…</Page>
@@ -45,6 +55,15 @@ export default function Dashboard() {
           WhatsApp aún no está conectado: puedes preparar contactos, flujos y plantillas, pero no se enviarán mensajes. <Link to="/settings">Ver conexión</Link>
         </div>
       )}
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', marginBottom: 16 }}>
+        {QUICK.map((qa) => (
+          <Link key={qa.to} to={qa.to} className="card" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <div style={{ fontSize: 20 }}>{qa.icon}</div>
+            <strong>{qa.title}</strong>
+            <div className="muted">{qa.hint}</div>
+          </Link>
+        ))}
+      </div>
       {o && (
         <>
           <div className="grid grid-4">
@@ -97,6 +116,51 @@ export default function Dashboard() {
               )}
             </Card>
           </div>
+
+          {o.growth30 && (
+            <div className="grid grid-2" style={{ marginTop: 16 }}>
+              <Card title="Crecimiento de contactos (30 días)">
+                <div className="legend">
+                  <span>
+                    <i className="dot" style={{ background: 'var(--brand)', marginRight: 4 }} />
+                    Nuevos: {o.growth30.joined}
+                  </span>
+                  <span>Bajas y bloqueos: {o.growth30.left}</span>
+                </div>
+                <div className="bars" style={{ height: 110 }}>
+                  {o.growth30.perDay.map((d) => {
+                    const peak = Math.max(1, ...o.growth30!.perDay.map((x) => x.count))
+                    return (
+                      <div className="bar-col" key={d.date} title={`${d.date}: ${d.count}`} style={{ minWidth: 4 }}>
+                        <div className="bar-stack">
+                          <div className="bar out" style={{ height: `${(d.count / peak) * 100}%`, width: '70%', maxWidth: 'none' }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </Card>
+              <Card title="Broadcasts (últimos 30 días)" actions={<Link to="/broadcasts">Abrir</Link>}>
+                <table>
+                  <tbody>
+                    <tr><td>Campañas</td><td>{o.broadcasts30?.campaigns ?? 0}</td></tr>
+                    <tr><td>Completadas</td><td>{o.broadcasts30?.completed ?? 0}</td></tr>
+                    <tr><td>Mensajes enviados</td><td>{o.broadcasts30?.messagesSent ?? 0}</td></tr>
+                    <tr><td>Tasa media de lectura</td><td>{o.broadcasts30?.avgOpenRate ?? 0}%</td></tr>
+                    <tr><td>Fallidos / sin entregar</td><td>{o.broadcasts30?.failed ?? 0}</td></tr>
+                  </tbody>
+                </table>
+              </Card>
+            </div>
+          )}
+
+          <Card title="Estado del agente IA" actions={<Link to="/ai">Configurar</Link>}>
+            <div className="row">
+              <Badge tone={data?.account.ai.ready ? 'green' : 'gray'}>{data?.account.ai.ready ? 'Activo' : 'Inactivo'}</Badge>
+              <span>{data?.knowledge ?? 0} fuentes de conocimiento</span>
+              {data?.account.ai.ready && <span className="muted">· modelo {data.account.ai.model}</span>}
+            </div>
+          </Card>
 
           <Card title="Etiquetas principales">
             {o.labels.length === 0 ? (
