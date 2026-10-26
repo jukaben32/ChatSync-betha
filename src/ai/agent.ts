@@ -2,6 +2,7 @@ import { prisma } from '../prisma.js';
 import { env } from '../config.js';
 import { getSetting } from '../domain/settings.js';
 import { addLabelWithTriggers, removeLabel } from '../domain/labels.js';
+import { searchKnowledge } from './knowledge.js';
 
 export interface AgentConfig {
   enabled: boolean;
@@ -66,13 +67,14 @@ function agentTools() {
   ];
 }
 
-async function systemPrompt(phone: string) {
-  const [sources, sequences, ai] = await Promise.all([
-    prisma.knowledgeSource.findMany({ orderBy: { createdAt: 'asc' }, take: 50 }),
+/** `query` = lo último que dijo el cliente: solo se incluyen los fragmentos de conocimiento relevantes para él. */
+async function systemPrompt(phone: string, query = '') {
+  const [found, sequences, ai] = await Promise.all([
+    query.trim() ? searchKnowledge(query) : Promise.resolve([]),
     prisma.sequence.findMany({ where: { active: true }, select: { name: true, kind: true } }),
     getSetting('ai'),
   ]);
-  const knowledge = sources.map((s) => `## ${s.title}\n${s.content}`).join('\n\n').slice(0, 24_000);
+  const knowledge = found.map((c) => `## ${c.title}\n${c.text}`).join('\n\n');
   return [
     process.env.AI_SYSTEM_PROMPT ?? 'Eres un asistente de atención al cliente por WhatsApp. Responde en el idioma del cliente, de forma breve y amable.',
     'Responde únicamente con información de la base de conocimiento. Si no la tienes, ofrece transferir a una persona.',
@@ -81,7 +83,7 @@ async function systemPrompt(phone: string) {
     ai.restrictedTopics.trim() ? `Temas restringidos (no los trates, deriva a una persona): ${ai.restrictedTopics}` : '',
     sequences.length ? `Secuencias disponibles: ${sequences.filter((s) => s.kind === 'sequence').map((s) => s.name).join(', ') || '—'}.\nFlujos disponibles: ${sequences.filter((s) => s.kind === 'flow').map((s) => s.name).join(', ') || '—'}.` : '',
     `Teléfono del cliente: ${phone}`,
-    knowledge ? `\n# Base de conocimiento\n${knowledge}` : '',
+    knowledge ? `\n# Información relevante de la base de conocimiento\n${knowledge}` : '\n(No se encontró información relevante en la base de conocimiento para esta pregunta.)',
   ]
     .filter(Boolean)
     .join('\n');
@@ -112,7 +114,8 @@ export async function runAgentTurn(params: {
   if (!subscriber) return { ok: false, error: 'subscriber_not_found', actions: [] };
 
   const settings = await getSetting('ai');
-  const messages: ChatMessage[] = [{ role: 'system', content: await systemPrompt(params.phone) }, ...params.history];
+  const query = params.history.filter((m) => m.role === 'user').slice(-3).map((m) => m.content).join(' ');
+  const messages: ChatMessage[] = [{ role: 'system', content: await systemPrompt(params.phone, query) }, ...params.history];
   const tools = settings.autoActions ? agentTools() : agentTools().filter((t) => ['handover_to_human', 'skip_reply'].includes(t.function.name));
   const actions: string[] = [];
   let handover = false;
@@ -210,6 +213,24 @@ export async function rewriteReply(text: string, tone = 'amable y profesional'):
   return out?.content?.trim() ?? text;
 }
 
+/** Recordatorio breve para retomar una conversación en la que el cliente dejó de contestar. */
+export async function composeNudge(phone: string, history: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<string> {
+  if (!agentReady()) throw new Error('agent_disabled');
+  const query = history.filter((m) => m.role === 'user').slice(-3).map((m) => m.content).join(' ');
+  const out = await complete(
+    [
+      {
+        role: 'system',
+        content: `${await systemPrompt(phone, query)}\n\nEl cliente dejó de responder. Escribe UN recordatorio muy breve (1-2 frases), amable, sin presionar, que retome el último tema. Mismo idioma que la conversación. Devuelve solo el mensaje.`,
+      },
+      ...history,
+    ],
+    undefined,
+    200,
+  );
+  return out?.content?.trim() ?? '';
+}
+
 /** Para el equipo: traduce un mensaje al idioma indicado (código ISO o nombre). */
 export async function translateText(text: string, target: string): Promise<string> {
   if (!agentReady()) throw new Error('agent_disabled');
@@ -227,7 +248,8 @@ export async function translateText(text: string, target: string): Promise<strin
 /** Para el equipo: sugiere una respuesta basada en el historial y la base de conocimiento. */
 export async function suggestReply(phone: string, history: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<string> {
   if (!agentReady()) throw new Error('agent_disabled');
-  const out = await complete([{ role: 'system', content: await systemPrompt(phone) }, ...history], undefined, 600);
+  const query = history.filter((m) => m.role === 'user').slice(-3).map((m) => m.content).join(' ');
+  const out = await complete([{ role: 'system', content: await systemPrompt(phone, query) }, ...history], undefined, 600);
   return out?.content?.trim() ?? '';
 }
 

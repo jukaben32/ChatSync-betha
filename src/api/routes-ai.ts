@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
 import { analyzeSubscriber, agentReady, rewriteReply, suggestReply, translateText } from '../ai/agent.js';
 import { getSetting } from '../domain/settings.js';
+import { subRef } from '../domain/subscriber-filters.js';
 
 async function history(conversationId: string) {
   const rows = await prisma.message.findMany({ where: { conversationId }, orderBy: { createdAt: 'desc' }, take: 30 });
@@ -57,7 +58,7 @@ export async function aiRoutes(app: FastifyInstance) {
   // Subscriber IQ: resumen, lead score, riesgo de abandono, sentimiento y siguiente acción
   app.get('/api/subscribers/:phone/insights', async (request, reply) => {
     const { phone } = request.params as { phone: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     const blocked = guard(reply);
     if (blocked) return blocked;

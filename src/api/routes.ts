@@ -13,7 +13,10 @@ import { aiRoutes } from './routes-ai.js';
 import { mcpRoutes } from './routes-mcp.js';
 import { v1Routes } from './routes-v1.js';
 import { contactRoutes } from './routes-contacts.js';
-import { subscriberWhere } from '../domain/subscriber-filters.js';
+import { formRoutes } from './routes-forms.js';
+import { bookingRoutes } from './routes-booking.js';
+import { authRoutes } from './routes-auth.js';
+import { subRef, subscriberWhere } from '../domain/subscriber-filters.js';
 
 const subscriberInclude = {
   labels: { include: { label: true } },
@@ -96,7 +99,7 @@ export async function apiRoutes(app: FastifyInstance) {
   app.get('/api/subscribers/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const subscriber = await prisma.subscriber.findUnique({
-      where: { phone },
+      where: subRef(phone),
       include: {
         labels: { include: { label: true } },
         lists: { include: { list: true } },
@@ -114,10 +117,10 @@ export async function apiRoutes(app: FastifyInstance) {
   app.patch('/api/subscribers/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const body = request.body as { name?: string; email?: string; customFields?: Record<string, unknown>; blocked?: boolean; optedOut?: boolean };
-    const current = await prisma.subscriber.findUnique({ where: { phone } });
+    const current = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!current) return reply.code(404).send({ error: 'subscriber_not_found' });
     return prisma.subscriber.update({
-      where: { phone },
+      where: subRef(phone),
       data: {
         name: body.name,
         email: body.email,
@@ -132,15 +135,15 @@ export async function apiRoutes(app: FastifyInstance) {
 
   app.delete('/api/subscribers/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
-    await prisma.subscriber.delete({ where: { phone } });
+    await prisma.subscriber.delete({ where: subRef(phone) });
     return { ok: true };
   });
 
   app.get('/api/subscribers/:phone/notes', async (request, reply) => {
     const { phone } = request.params as { phone: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     return prisma.subscriberNote.findMany({ where: { subscriberId: subscriber.id }, orderBy: { createdAt: 'desc' }, take: 100 });
   });
@@ -148,7 +151,7 @@ export async function apiRoutes(app: FastifyInstance) {
   // Resumen CRM del contacto: etapa, valor y responsable de su oportunidad más reciente
   app.get('/api/subscribers/:phone/crm', async (request, reply) => {
     const { phone } = request.params as { phone: string };
-    const deal = await prisma.crmDeal.findFirst({ where: { subscriber: { phone } }, orderBy: { updatedAt: 'desc' } });
+    const deal = await prisma.crmDeal.findFirst({ where: { subscriber: subRef(phone) }, orderBy: { updatedAt: 'desc' } });
     if (!deal) return reply.code(404).send({ error: 'deal_not_found' });
     return deal;
   });
@@ -156,7 +159,7 @@ export async function apiRoutes(app: FastifyInstance) {
   app.put('/api/subscribers/:phone/crm', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const body = request.body as { stage?: string; value?: number; owner?: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     const existing = await prisma.crmDeal.findFirst({ where: { subscriberId: subscriber.id }, orderBy: { updatedAt: 'desc' } });
     const data = { stage: body.stage, owner: body.owner, ...(body.value !== undefined ? { value: Math.round(body.value) } : {}) };
@@ -184,7 +187,7 @@ export async function apiRoutes(app: FastifyInstance) {
   app.post('/api/subscribers/:phone/labels', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const body = request.body as { labels?: string[] };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     const created = [];
     for (const name of body.labels ?? []) {
@@ -196,7 +199,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
   app.delete('/api/subscribers/:phone/labels/:labelId', async (request, reply) => {
     const { phone, labelId } = request.params as { phone: string; labelId: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     await prisma.subscriberLabel.deleteMany({ where: { subscriberId: subscriber.id, labelId } });
     return { ok: true };
@@ -247,6 +250,8 @@ export async function apiRoutes(app: FastifyInstance) {
       media?: { kind: 'image' | 'document' | 'audio' | 'video'; url: string; caption?: string; filename?: string };
       buttons?: { body: string; buttons: Array<{ title: string }> };
     };
+    // Si entró una persona del equipo con su cuenta, el mensaje queda firmado con su nombre
+    const sender = request.actor?.id ? request.actor.name : (body.sender ?? 'agent');
     try {
       if (body.media?.url || body.buttons?.buttons?.length) {
         const conversation = await prisma.conversation.findUnique({ where: { id }, include: { subscriber: true } });
@@ -254,11 +259,11 @@ export async function apiRoutes(app: FastifyInstance) {
         const content = body.media?.url
           ? ({ type: 'media', ...body.media } as const)
           : ({ type: 'buttons', body: body.buttons!.body, buttons: body.buttons!.buttons.map((b, i) => ({ id: `m${i}`, title: b.title })) } as const);
-        const result = await sendMessage({ phone: conversation.subscriber.phone, content, conversationId: id, sender: body.sender ?? 'agent' });
+        const result = await sendMessage({ phone: conversation.subscriber.phone, content, conversationId: id, sender });
         return reply.code(result.ok ? 200 : 502).send(result);
       }
       if (!body.body?.trim()) return reply.code(400).send({ error: 'body is required' });
-      const result = await handleOutbound({ conversationId: id, body: body.body.trim(), sender: body.sender });
+      const result = await handleOutbound({ conversationId: id, body: body.body.trim(), sender });
       return reply.code(result.ok ? 200 : 502).send(result);
     } catch (error) {
       return reply.code(404).send({ error: (error as Error).message });
@@ -279,7 +284,7 @@ export async function apiRoutes(app: FastifyInstance) {
     const conversation = await prisma.conversation.findUnique({ where: { id } });
     if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
     return prisma.subscriberNote.create({
-      data: { subscriberId: conversation.subscriberId, conversationId: id, author: body.author ?? 'agent', body: body.body ?? '' },
+      data: { subscriberId: conversation.subscriberId, conversationId: id, author: request.actor?.id ? request.actor.name : (body.author ?? 'agent'), body: body.body ?? '' },
     });
   });
 
@@ -356,5 +361,8 @@ export async function apiRoutes(app: FastifyInstance) {
   await app.register(mcpRoutes);
   await app.register(v1Routes);
   await app.register(contactRoutes);
+  await app.register(formRoutes);
+  await app.register(bookingRoutes);
+  await app.register(authRoutes);
   await app.register(settingsRoutes);
 }

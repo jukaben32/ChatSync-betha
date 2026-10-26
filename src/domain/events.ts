@@ -7,7 +7,9 @@ export type EventType =
   | 'message.status'
   | 'subscriber.created'
   | 'conversation.updated'
-  | 'broadcast.sent';
+  | 'broadcast.sent'
+  | 'form.submitted'
+  | 'appointment.booked';
 
 /**
  * Dispara los webhooks salientes suscritos al evento. Se espera su resolución (máx. 4 s)

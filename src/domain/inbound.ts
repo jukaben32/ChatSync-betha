@@ -29,6 +29,17 @@ export function matchesKeyword(text: string, keyword: string | null, matchType: 
   return t.includes(k);
 }
 
+/** Un botón de un broadcast fue pulsado: se cuenta como clic una sola vez por destinatario. */
+async function registerBroadcastClick(subscriberId: string, buttonId: string, title: string) {
+  const recipient = await prisma.broadcastRecipient.findFirst({
+    where: { subscriberId, clickedAt: null, status: { in: ['sent', 'delivered', 'read'] } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!recipient) return;
+  await prisma.broadcastRecipient.update({ where: { id: recipient.id }, data: { clickedAt: new Date(), clickedButton: (title || buttonId).slice(0, 64) } });
+  await prisma.broadcast.update({ where: { id: recipient.broadcastId }, data: { clickedCount: { increment: 1 } } });
+}
+
 const STOP_WORDS = ['stop', 'baja', 'cancelar suscripcion', 'cancelar suscripción'];
 const OFF_HOURS_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
@@ -92,12 +103,13 @@ export async function handleInbound(params: InboundContext) {
   });
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: { updatedAt: new Date(), unread: true, ...(reopened && !conversation.assignedTo ? { status: 'open' } : {}), followUpAt: null },
+    data: { updatedAt: new Date(), unread: true, nudges: 0, ...(reopened && !conversation.assignedTo ? { status: 'open' } : {}), followUpAt: null },
   });
   await emitEvent('message.received', { name: subscriber.name, phone, message: body, type: messageType ?? 'text', conversationId: conversation.id });
   if (providerMessageId && whatsappConfigured()) await markWhatsAppRead(providerMessageId);
 
   await stopSequencesOnReply(subscriber.id);
+  if (interactiveId?.startsWith('bc_')) await registerBroadcastClick(subscriber.id, interactiveId, body);
 
   const text = body.trim().toLowerCase();
   if (STOP_WORDS.includes(text)) {

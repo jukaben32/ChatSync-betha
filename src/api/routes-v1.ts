@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { prisma } from '../prisma.js';
-import { authenticate } from '../auth.js';
+import { authenticate, clientIp } from '../auth.js';
 import { whatsappConfigured } from '../config.js';
 import { sendMessage } from '../domain/messaging.js';
 import type { OutgoingContent } from '../domain/messaging.js';
@@ -106,9 +106,10 @@ export async function v1Routes(app: FastifyInstance) {
     const p = paramsOf(request);
     const header = request.headers.authorization;
     const key = String(p.apiToken ?? p.api_token ?? (header?.toLowerCase().startsWith('bearer ') ? header.slice(7) : (request.headers['x-api-key'] ?? ''))).trim();
-    const result = await authenticate(key, request.method, request.url.split('?')[0]);
+    const result = await authenticate(key, request.method, request.url.split('?')[0], clientIp(request));
     if (!result.ok) return reply.code(result.status).send({ status: '0', message: result.error === 'unauthorized' ? 'Invalid or missing apiToken' : result.error });
-    request.apiKeyName = result.keyName;
+    request.actor = result.actor;
+    if (result.actor.role === 'api') request.apiKeyName = result.actor.name;
   });
 
   const paramsOf = (request: FastifyRequest): Params => ({ ...((request.query as Params) ?? {}), ...(typeof request.body === 'object' && request.body ? (request.body as Params) : {}) });

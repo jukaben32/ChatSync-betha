@@ -3,6 +3,8 @@ import { getOrCreateConversation, renderVars, sendMessage, withinServiceWindow }
 import type { OutgoingContent } from '../domain/messaging.js';
 import { addLabelWithTriggers, removeLabel } from '../domain/labels.js';
 import { getSetting, isOpenNow } from '../domain/settings.js';
+import { emitEvent } from '../domain/events.js';
+import { availableSlots, bookSlot, BookingError, describeSlot, formatSlot } from '../domain/booking.js';
 import { assertPublicUrl, getPath } from '../util/net.js';
 
 export interface FlowStep {
@@ -32,7 +34,7 @@ const MAX_STEPS = 100;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Acciones que dejan el flujo esperando la respuesta del cliente. */
-export const AWAITING_ACTIONS = ['send_buttons', 'send_list', 'ask'];
+export const AWAITING_ACTIONS = ['send_buttons', 'send_list', 'ask', 'book_slot'];
 
 function followingOrder(sorted: FlowStep[], order: number): number | undefined {
   return sorted.find((s) => s.order > order)?.order;
@@ -225,6 +227,36 @@ export async function runFlow(params: { phone: string; flow: Flow; startOrder?: 
         executed.push(`${step.action}:${step.order}`);
         return { ok: true, executed };
       }
+      case 'book_slot': {
+        // Ofrece los próximos huecos libres en una lista y espera a que el cliente elija uno
+        const booking = await getSetting('booking');
+        const slots = await availableSlots(10);
+        if (!slots.length) {
+          await send({ type: 'text', body: String(p.noSlotsText ?? 'Ahora mismo no hay horarios disponibles. Te avisaremos en cuanto se libere alguno.') });
+          break;
+        }
+        const rows = slots.map((d) => ({ id: `slot:${d.toISOString()}`, title: formatSlot(d, booking.timezone) }));
+        const result = await send({ type: 'list', body: String(p.body ?? '¿Qué horario te viene mejor?'), buttonText: 'Ver horarios', rows });
+        if (!result.ok) return { ok: false, executed };
+        await startSession(sub.id, params.flow.id, step.order);
+        executed.push(`${step.action}:${step.order}`);
+        return { ok: true, executed, awaiting: true };
+      }
+      case 'submit_form': {
+        // Cierra un formulario: guarda las respuestas (ya almacenadas en los campos del contacto) y avisa
+        const form = p.formId ? await prisma.form.findUnique({ where: { id: String(p.formId) } }) : null;
+        if (form) {
+          const fresh = await prisma.subscriber.findUnique({ where: { id: sub.id } });
+          const fields = (fresh?.customFields ?? {}) as Record<string, unknown>;
+          const questions = (form.questions ?? []) as unknown as Array<{ key: string }>;
+          const answers = Object.fromEntries(questions.map((q) => [q.key, fields[q.key] ?? null]));
+          await prisma.formSubmission.create({ data: { formId: form.id, subscriberId: sub.id, answers: answers as never } });
+          if (form.labelOnDone) await addLabelWithTriggers(sub.id, form.labelOnDone);
+          await send({ type: 'text', body: form.doneMessage });
+          await emitEvent('form.submitted', { form: form.name, name: sub.name, phone: params.phone, answers });
+        }
+        break;
+      }
       case 'enroll_sequence':
         if (p.sequenceId) {
           const { triggerSequenceForSubscriber } = await import('../domain/sequences.js');
@@ -248,10 +280,25 @@ export async function runFlow(params: { phone: string; flow: Flow; startOrder?: 
   return { ok: true, executed };
 }
 
+/** 25/12/2026, 25-12-2026 o 2026-12-25 → "2026-12-25"; null si no es una fecha real. */
+export function normalizeDate(text: string): string | null {
+  const t = text.trim();
+  let y: number, m: number, d: number;
+  let match = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  else if ((match = t.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/))) [d, m, y] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  else return null;
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 function validInput(kind: string | undefined, text: string): boolean {
   const value = text.trim();
   if (!value) return false;
   switch (kind) {
+    case 'date':
+      return normalizeDate(value) !== null;
     case 'number':
       return value !== '' && !Number.isNaN(Number(value.replace(',', '.')));
     case 'email':
@@ -289,14 +336,53 @@ export async function resumeFlowSession(params: { phone: string; sessionId: stri
     order === undefined ? Promise.resolve() : runFlow({ phone: params.phone, flow, startOrder: order, message: params.text, resuming: true });
 
   if (step.action === 'ask') {
+    const said = params.text.trim().toLowerCase();
+    // Formularios: el cliente puede abandonar escribiendo «cancelar» y saltar las preguntas opcionales con «omitir»
+    if (p.cancellable && ['cancelar', 'cancel', 'salir'].includes(said)) {
+      await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
+      await sendMessage({ phone: params.phone, content: { type: 'text', body: 'Formulario cancelado. Cuando quieras, puedes empezar de nuevo.' }, sender: 'bot' });
+      return { handled: true };
+    }
+    if (p.optional && ['omitir', 'skip'].includes(said)) {
+      await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
+      await resume(p.next !== undefined && p.next !== '' ? Number(p.next) : followingOrder(sorted, step.order));
+      return { handled: true };
+    }
     if (!validInput(p.validate, params.text)) {
       await sendMessage({ phone: params.phone, content: { type: 'text', body: String(p.errorText ?? 'Ese dato no parece válido, inténtalo de nuevo.') }, sender: 'bot' });
       await prisma.flowSession.update({ where: { id: session.id }, data: { updatedAt: new Date() } });
       return { handled: true };
     }
-    if (p.field) await patchFields(session.subscriberId, { [String(p.field)]: p.validate === 'number' ? Number(params.text.replace(',', '.')) : params.text.trim() });
+    if (p.field) {
+      const value = p.validate === 'number' ? Number(params.text.replace(',', '.')) : p.validate === 'date' ? normalizeDate(params.text) : params.text.trim();
+      await patchFields(session.subscriberId, { [String(p.field)]: value });
+    }
     await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
     await resume(p.next !== undefined && p.next !== '' ? Number(p.next) : followingOrder(sorted, step.order));
+    return { handled: true };
+  }
+
+  if (step.action === 'book_slot') {
+    const chosen = params.interactiveId?.startsWith('slot:') ? new Date(params.interactiveId.slice(5)) : null;
+    if (!chosen || Number.isNaN(chosen.getTime())) {
+      // Escribió otra cosa en vez de elegir un horario: se libera el flujo y sigue la atención normal
+      await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
+      return { handled: false };
+    }
+    await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
+    try {
+      await bookSlot({ subscriberId: session.subscriberId, startsAt: chosen, title: p.title });
+      const booking = await getSetting('booking');
+      const when = describeSlot(chosen, booking.timezone);
+      await sendMessage({ phone: params.phone, content: { type: 'text', body: String(p.confirmText ?? '✅ Tu cita está confirmada para el {{fecha}} a las {{hora}}.').replace('{{fecha}}', when.date).replace('{{hora}}', when.time) }, sender: 'bot' });
+    } catch (e) {
+      if (!(e instanceof BookingError)) throw e;
+      // El hueco se ocupó mientras el cliente decidía: se vuelve a ofrecer la lista actualizada
+      await sendMessage({ phone: params.phone, content: { type: 'text', body: 'Ese horario acaba de ocuparse. Te muestro los que siguen libres.' }, sender: 'bot' });
+      await runFlow({ phone: params.phone, flow, startOrder: step.order });
+      return { handled: true };
+    }
+    await resume(followingOrder(sorted, step.order));
     return { handled: true };
   }
 
@@ -309,6 +395,8 @@ export async function resumeFlowSession(params: { phone: string; sessionId: stri
       return { handled: false };
     }
     await prisma.flowSession.update({ where: { id: session.id }, data: { status: 'done' } });
+    // «field»: la opción elegida se guarda en ese campo personalizado (lo usan los formularios)
+    if (p.field) await patchFields(session.subscriberId, { [String(p.field)]: String(options[index].title ?? '') });
     const target = options[index].next;
     await resume(target !== undefined && target !== null && String(target) !== '' ? Number(target) : followingOrder(sorted, step.order));
     return { handled: true };

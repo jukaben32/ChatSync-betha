@@ -8,6 +8,7 @@ import { sendMessage } from '../domain/messaging.js';
 import { addLabelWithTriggers, removeLabel } from '../domain/labels.js';
 import { enrollSubscriberInSequence, triggerBotFlowForSubscriber, triggerSequenceForSubscriber } from '../domain/sequences.js';
 import { createMetaTemplate, listMetaTemplates } from '../whatsapp/client.js';
+import { availableSlots, BookingError, bookSlot, cancelAppointment, formatSlot } from '../domain/booking.js';
 
 const digits = (v: string) => v.replace(/\D/g, '');
 
@@ -229,6 +230,44 @@ export function createChatsycsMcpServer(): McpServer {
     const sub = await subscriberBy(a.phone);
     const r = await prisma.flowSession.updateMany({ where: { subscriberId: sub.id, status: 'active' }, data: { status: 'done' } });
     return { ok: true, closedSessions: r.count };
+  });
+
+  // ---------- Citas y formularios ----------
+  tool('get_available_slots', 'Próximos huecos libres para citas (según el horario configurado).', { limit: z.number().int().min(1).max(100).default(20) }, async (a) => {
+    const settings = await getSetting('booking');
+    const slots = await availableSlots(a.limit);
+    return { enabled: settings.enabled, timezone: settings.timezone, slots: slots.map((d) => ({ startsAt: d.toISOString(), label: formatSlot(d, settings.timezone) })) };
+  });
+
+  tool('list_appointments', 'Lista citas desde hoy, opcionalmente por estado (booked, cancelled, completed, no_show).', { status: z.enum(['booked', 'cancelled', 'completed', 'no_show']).optional(), limit: z.number().int().min(1).max(100).default(30) }, async (a) =>
+    prisma.appointment.findMany({
+      where: { startsAt: { gte: new Date(Date.now() - 86_400_000) }, ...(a.status ? { status: a.status } : {}) },
+      include: { subscriber: { select: { phone: true, name: true } } },
+      orderBy: { startsAt: 'asc' },
+      take: a.limit,
+    }),
+  );
+
+  tool('book_appointment', 'Reserva una cita para un contacto en uno de los huecos libres (startsAt en ISO 8601).', { phone: z.string(), startsAt: z.string(), title: z.string().optional() }, async (a) => {
+    const startsAt = new Date(a.startsAt);
+    if (Number.isNaN(startsAt.getTime())) throw new Error('startsAt must be an ISO 8601 date');
+    const sub = await prisma.subscriber.upsert({ where: { phone: digits(a.phone) }, update: {}, create: { phone: digits(a.phone), source: 'mcp' } });
+    try {
+      return await bookSlot({ subscriberId: sub.id, startsAt, title: a.title });
+    } catch (e) {
+      throw new Error(e instanceof BookingError ? e.code : (e as Error).message);
+    }
+  });
+
+  tool('cancel_appointment', 'Cancela una cita y sus recordatorios.', { appointmentId: z.string().uuid() }, async (a) => cancelAppointment(a.appointmentId, 'cancelled'));
+
+  tool('list_forms', 'Formularios del chat con su número de envíos.', {}, async () => prisma.form.findMany({ select: { id: true, name: true, keyword: true, active: true, _count: { select: { submissions: true } } } }));
+
+  tool('send_form', 'Lanza un formulario a un contacto para que lo responda por WhatsApp.', { phone: z.string(), formId: z.string().uuid() }, async (a) => {
+    const form = await prisma.form.findUnique({ where: { id: a.formId } });
+    if (!form?.sequenceId) throw new Error('form_not_found');
+    await prisma.subscriber.upsert({ where: { phone: digits(a.phone) }, update: {}, create: { phone: digits(a.phone), source: 'mcp' } });
+    return triggerBotFlowForSubscriber({ phone: digits(a.phone), flowId: form.sequenceId });
   });
 
   // ---------- Broadcasts ----------

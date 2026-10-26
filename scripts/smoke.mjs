@@ -346,6 +346,198 @@ try {
   const tr = await call('/api/ai/translate', { body: { text: 'hola' } });
   check('traducir sin IA configurada → 409 explícito', tr.status === 409 || tr.status === 200, String(tr.status));
 
+  console.log('\n15) Conocimiento: archivos PDF/texto y búsqueda por relevancia');
+  const makePdf = (text) => {
+    const objs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>'];
+    const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+    objs.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    let out = '%PDF-1.4\n';
+    const offsets = [];
+    objs.forEach((o, i) => {
+      offsets.push(out.length);
+      out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+    });
+    const xref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    return Buffer.from(out, 'latin1').toString('base64');
+  };
+  const kbIds = [];
+  const pdfRes = await call('/api/knowledge/file', { body: { filename: `horarios-${tag}.pdf`, contentBase64: makePdf(`Atendemos de lunes a viernes de 9 a 18 horas zorzal${tag}`) } });
+  check('subir PDF: texto extraído y fragmentado', pdfRes.status === 201 && pdfRes.data?.chunks >= 1, JSON.stringify(pdfRes.data));
+  kbIds.push(pdfRes.data?.id);
+  const txtRes = await call('/api/knowledge/file', { body: { filename: `envios-${tag}.txt`, contentBase64: Buffer.from(`El envio a domicilio tarda tres dias habiles y cuesta cinco dolares ${tag}`).toString('base64') } });
+  check('subir texto plano', txtRes.status === 201);
+  kbIds.push(txtRes.data?.id);
+  check('tipo de archivo no admitido → 415', (await call('/api/knowledge/file', { body: { filename: 'x.exe', contentBase64: Buffer.from('MZ').toString('base64') } })).status === 415);
+  const search = (await call(`/api/knowledge/search?q=${encodeURIComponent('horario de atencion')}`)).data;
+  check('la búsqueda devuelve el fragmento del PDF', search.results?.some((r) => r.text.includes(`zorzal${tag}`)), JSON.stringify(search.results?.map((r) => r.title)));
+  const search2 = (await call(`/api/knowledge/search?q=${encodeURIComponent('cuanto cuesta el envio')}`)).data;
+  check('la búsqueda distingue otro tema', search2.results?.[0]?.title === `envios-${tag}.txt`, JSON.stringify(search2.results?.map((r) => r.title)));
+  const kbList = (await call('/api/knowledge')).data;
+  check('las fuentes informan su número de fragmentos', kbList.find((k) => k.id === kbIds[0])?._count?.chunks >= 1);
+  for (const id of kbIds) await call(`/api/knowledge/${id}`, { method: 'DELETE' });
+
+  console.log('\n16) Formularios en el chat');
+  const formKw = `registro${tag}`;
+  const form = (
+    await call('/api/forms', {
+      body: {
+        name: `Reserva ${tag}`,
+        keyword: formKw,
+        intro: 'Vamos a registrarte',
+        doneMessage: '¡Listo, te esperamos!',
+        labelOnDone: `form-ok-${tag}`,
+        questions: [{ label: 'Nombre completo' }, { label: 'Personas', type: 'number' }, { label: 'Servicio', type: 'choice', options: ['Limpieza', 'Revisión'] }, { label: 'Notas', required: false }],
+      },
+    })
+  ).data;
+  created.labels.push(`form-ok-${tag}`);
+  check('crear formulario y compilar su flujo', Boolean(form?.id && form?.sequenceId), JSON.stringify(form));
+  check('formulario sin opciones suficientes → 400', (await call('/api/forms', { body: { name: 'x', questions: [{ label: 'q', type: 'choice', options: ['a'] }] } })).status === 400);
+  const F1 = `1555${tag}13`;
+  created.phones.push(F1);
+  await sim(F1, `quiero ${formKw}`, undefined, 'Cliente Form');
+  await sim(F1, 'Luis Mora');
+  await sim(F1, 'muchas');
+  check('respuesta inválida → mensaje de error', (await outbound(F1)).some((m) => m.body === 'Escribe solo un número, por favor.'));
+  await sim(F1, '3');
+  await sim(F1, 'Revisión', 'o3_1');
+  await sim(F1, 'omitir');
+  const subs = (await call(`/api/forms/${form.id}/submissions`)).data;
+  check('el envío del formulario se guarda con las respuestas', subs.submissions?.[0]?.answers?.nombre_completo === 'Luis Mora' && subs.submissions[0].answers.personas === 3 && subs.submissions[0].answers.servicio === 'Revisión', JSON.stringify(subs.submissions?.[0]?.answers));
+  check('mensaje final y etiqueta del formulario', (await outbound(F1)).some((m) => m.body === '¡Listo, te esperamos!') && (await call(`/api/subscribers/${F1}`)).data.labels.some((l) => l.label.name === `form-ok-${tag}`));
+  const formCsv = await (await fetch(`${BASE}/api/forms/${form.id}/export`, { headers: { Authorization: `Bearer ${KEY}` } })).text();
+  check('exportar envíos a CSV', formCsv.includes('Luis Mora') && formCsv.includes('Nombre completo'));
+  await call(`/api/forms/${form.id}`, { method: 'DELETE' });
+  check('al borrar el formulario se borra su flujo', !(await call('/api/sequences?kind=flow')).data.some((s) => s.id === form.sequenceId));
+
+  console.log('\n17) Citas: huecos, reservas sin duplicar y flujo de reserva');
+  const bookingOriginal = (await call('/api/settings')).data.booking;
+  const allDays = Object.fromEntries(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((d) => [d, { enabled: true, start: '08:00', end: '20:00' }]));
+  await call('/api/settings/booking', { method: 'PUT', body: { ...bookingOriginal, enabled: true, timezone: 'UTC', slotMinutes: 30, minNoticeHours: 1, maxDaysAhead: 5, days: allDays, reminderHours: [] } });
+  const slots = (await call('/api/booking/slots?limit=20')).data;
+  check('hay huecos disponibles', slots.enabled && slots.slots.length >= 10, JSON.stringify(slots.slots?.length));
+  const B1 = `1555${tag}14`;
+  const B2 = `1555${tag}15`;
+  const B3 = `1555${tag}16`;
+  created.phones.push(B1, B2, B3);
+  const slotA = slots.slots[0].startsAt;
+  const booked1 = await call('/api/appointments', { body: { phone: B1, startsAt: slotA, notify: false } });
+  check('reservar un hueco', booked1.status === 201, JSON.stringify(booked1.data));
+  const booked2 = await call('/api/appointments', { body: { phone: B2, startsAt: slotA, notify: false } });
+  check('el mismo hueco ya no se puede reservar (409)', booked2.status === 409, JSON.stringify(booked2.data));
+  check('un hueco inexistente no se acepta (409)', (await call('/api/appointments', { body: { phone: B2, startsAt: '2020-01-01T10:00:00Z', notify: false } })).status === 409);
+  const slotsAfter = (await call('/api/booking/slots?limit=20')).data;
+  check('el hueco reservado desaparece de la lista', !slotsAfter.slots.some((s) => s.startsAt === slotA));
+  const cancelled = await call(`/api/appointments/${booked1.data.id}`, { method: 'PATCH', body: { status: 'cancelled' } });
+  check('cancelar libera el hueco', cancelled.status === 200 && (await call('/api/booking/slots?limit=20')).data.slots.some((s) => s.startsAt === slotA));
+  const bookKw = `cita${tag}`;
+  const bookFlow = (await call('/api/sequences', { body: { name: `Reserva flujo ${tag}`, kind: 'flow', triggerKeyword: bookKw, steps: [{ action: 'book_slot', order: 0, params: { body: '¿Cuándo vienes?' } }, { action: 'add_label', order: 1, params: { label: `con-cita-${tag}` } }] } })).data;
+  created.sequences.push(bookFlow.id);
+  created.labels.push(`con-cita-${tag}`);
+  await sim(B3, bookKw);
+  const offered = (await outbound(B3)).find((m) => m.metadata?.type === 'list');
+  check('el flujo ofrece los huecos en una lista', Boolean(offered), JSON.stringify((await outbound(B3)).map((m) => m.metadata?.type)));
+  const pick = (await call('/api/booking/slots?limit=3')).data.slots[1].startsAt;
+  await sim(B3, 'Elegida', `slot:${pick}`);
+  const mine = (await call(`/api/appointments?phone=${B3}`)).data;
+  check('elegir un hueco crea la cita', mine.length === 1 && mine[0].startsAt === pick && mine[0].status === 'booked', JSON.stringify(mine));
+  check('el cliente recibe la confirmación', (await outbound(B3)).some((m) => m.body.includes('cita está confirmada')));
+  check('el flujo continúa tras reservar', (await call(`/api/subscribers/${B3}`)).data.labels.some((l) => l.label.name === `con-cita-${tag}`));
+  for (const a of [...(await call(`/api/appointments?from=${new Date(Date.now() - 86400000).toISOString()}`)).data]) {
+    if (a.subscriber.phone.includes(`${tag}`)) await call(`/api/appointments/${a.id}`, { method: 'DELETE' });
+  }
+  await call('/api/settings/booking', { method: 'PUT', body: bookingOriginal });
+
+  console.log('\n18) Clics en botones de broadcast');
+  const C1 = `1555${tag}17`;
+  created.phones.push(C1);
+  await sim(C1, 'hola');
+  await call(`/api/subscribers/${C1}/labels`, { body: { labels: [`bc-btn-${tag}`] } });
+  created.labels.push(`bc-btn-${tag}`);
+  const bcClick = (await call('/api/broadcasts', { body: { name: `Clic ${tag}`, content: 'Oferta de hoy', audience: { labels: [`bc-btn-${tag}`] }, buttons: [{ title: 'Quiero' }, { title: 'No gracias' }] } })).data;
+  created.broadcasts.push(bcClick.id);
+  const sentBtn = await call(`/api/broadcasts/${bcClick.id}/send`, { body: {} });
+  check('broadcast con botones enviado', sentBtn.data?.sentCount === 1, JSON.stringify(sentBtn.data));
+  await sim(C1, 'Quiero', 'bc_0');
+  await sim(C1, 'Quiero', 'bc_0');
+  const afterClick = (await call(`/api/broadcasts/${bcClick.id}`)).data;
+  check('el clic se cuenta una sola vez por destinatario', afterClick.clickedCount === 1 && afterClick.recipients?.[0]?.clickedButton === 'Quiero', JSON.stringify([afterClick.clickedCount, afterClick.recipients?.[0]?.clickedButton]));
+
+  console.log('\n19) Equipo con cuentas, roles, teléfonos enmascarados e IPs permitidas');
+  const email = `agente-${tag}@example.com`;
+  const password = `Clave-${tag}-segura`;
+  const me = (await call('/api/auth/me')).data;
+  check('quién soy: administrador con su IP', me.role === 'admin' && Boolean(me.ip), JSON.stringify(me));
+  const member = (await call('/api/team', { body: { name: `Agente ${tag}`, email, role: 'agent', password } })).data;
+  created.team.push(member.id);
+  check('crear agente con contraseña (sin exponer el hash)', member.hasPassword === true && !('passwordHash' in member), JSON.stringify(member));
+  check('contraseña débil → 400', (await call('/api/team', { body: { name: 'x', email: `x-${tag}@example.com`, password: '123' } })).status === 400);
+  check('email repetido → 409', (await call('/api/team', { body: { name: 'y', email, password: 'otra-clave-larga' } })).status === 409);
+  const badLogin = await call('/api/auth/login', { body: { email, password: 'incorrecta' }, key: '' });
+  check('login con contraseña incorrecta → 401', badLogin.status === 401);
+  check('login con email inexistente → 401 (misma respuesta)', (await call('/api/auth/login', { body: { email: `no-${tag}@example.com`, password: 'lo-que-sea-1234' }, key: '' })).status === 401);
+  const login = await call('/api/auth/login', { body: { email, password }, key: '' });
+  check('login del agente', login.status === 200 && login.data?.role === 'agent' && login.data.token?.startsWith('st.'), JSON.stringify(login.data));
+  const agent = login.data.token;
+  const adminLogin = await call('/api/auth/login', { body: { key: KEY }, key: '' });
+  check('login con la clave de administrador', adminLogin.status === 200 && adminLogin.data?.role === 'admin');
+  check('clave de administrador incorrecta → 401', (await call('/api/auth/login', { body: { key: 'nope' }, key: '' })).status === 401);
+
+  const A1 = `1555${tag}18`;
+  created.phones.push(A1);
+  await sim(A1, 'hola agente', undefined, 'Cliente Privado');
+  const agentConvs = await call('/api/conversations', { key: agent });
+  check('el agente ve conversaciones', agentConvs.status === 200 && agentConvs.data.some((c) => c.subscriber.name === 'Cliente Privado'));
+  const rawAgent = JSON.stringify(agentConvs.data);
+  check('teléfonos enmascarados para el agente', !rawAgent.includes(A1) && rawAgent.includes('•'), rawAgent.slice(0, 200));
+  const adminConvs = JSON.stringify((await call('/api/conversations')).data);
+  check('el administrador sí ve el número completo', adminConvs.includes(A1));
+  const subId = agentConvs.data.find((c) => c.subscriber.name === 'Cliente Privado').subscriber.id;
+  check('el agente opera por id de contacto', (await call(`/api/subscribers/${subId}`, { key: agent })).status === 200);
+  check('añadir etiqueta por id', (await call(`/api/subscribers/${subId}/labels`, { body: { labels: [`por-agente-${tag}`] }, key: agent })).status === 200);
+  created.labels.push(`por-agente-${tag}`);
+  for (const [path, opts] of [
+    ['/api/settings', {}],
+    ['/api/api-keys', {}],
+    ['/api/subscribers/export', {}],
+    ['/api/subscribers/stats', {}],
+    ['/api/webhooks', {}],
+    ['/api/login-log', {}],
+    [`/api/subscribers/${subId}`, { method: 'DELETE' }],
+    ['/api/team', { body: { name: 'intruso' } }],
+    ['/api/subscribers/bulk', { body: { phones: [A1], action: 'delete' } }],
+  ]) {
+    const r = await call(path, { ...opts, key: agent });
+    check(`el agente NO puede ${opts.method ?? (opts.body ? 'POST' : 'GET')} ${path.replace(subId, ':id')} (403)`, r.status === 403, String(r.status));
+  }
+  check('el agente existe aún tras los intentos', (await call(`/api/subscribers/${subId}`)).status === 200);
+  const convId = agentConvs.data.find((c) => c.subscriber.name === 'Cliente Privado').id;
+  await call(`/api/conversations/${convId}/messages`, { body: { body: 'Respuesta del agente' }, key: agent });
+  const signed = (await outbound(A1)).find((m) => m.body.startsWith('Respuesta del agente'));
+  check('el mensaje queda firmado con el nombre del agente', signed?.metadata?.sender === `Agente ${tag}`, JSON.stringify(signed?.metadata));
+  check('el agente no puede leer el MCP ni la API v1', (await call('/api/mcp', { body: {}, key: agent })).status === 403);
+
+  const deact = await call(`/api/team/${member.id}`, { method: 'PATCH', body: { active: false } });
+  check('desactivar al agente', deact.status === 200 && deact.data.active === false);
+  check('su sesión deja de valer al instante (401)', (await call('/api/conversations', { key: agent })).status === 401);
+  check('y no puede volver a entrar', (await call('/api/auth/login', { body: { email, password }, key: '' })).status === 401);
+  const log = (await call('/api/login-log')).data;
+  check('el registro de accesos refleja éxitos y fallos', log.some((l) => l.ok === false) && log.some((l) => l.ok === true && l.actor === `Agente ${tag}`));
+
+  const rulesOk = await call('/api/settings/security', { method: 'PUT', body: { ipAllowlist: [me.ip] } });
+  check('guardar una lista de IPs que incluye la tuya', rulesOk.status === 200 && rulesOk.data.ipAllowlist.includes(me.ip), JSON.stringify(rulesOk.data));
+  check('con la lista activa sigues entrando', (await call('/api/account')).status === 200);
+  await call('/api/settings/security', { method: 'PUT', body: { ipAllowlist: [] } });
+  const lockout = await call('/api/settings/security', { method: 'PUT', body: { ipAllowlist: ['203.0.113.77'] } });
+  check('no deja guardar una lista que te bloquea', lockout.status === 400 && lockout.data?.error === 'would_lock_you_out', JSON.stringify(lockout.data));
+  check('regla de IP inválida → 400', (await call('/api/settings/security', { method: 'PUT', body: { ipAllowlist: ['10.0.0.0/'] } })).status === 400);
+  check('la lista sigue vacía tras los rechazos', (await call('/api/settings')).data.security.ipAllowlist.length === 0);
+
+  console.log('\n20) Origen de leads');
+  const srcRows = (await call('/api/analytics/sources')).data;
+  check('informe de orígenes con conversión', Array.isArray(srcRows) && srcRows.every((r) => typeof r.subscribers === 'number' && typeof r.conversion === 'number'), JSON.stringify(srcRows).slice(0, 160));
+
   console.log('\n10) Analítica y ajustes');
   const an = (await call('/api/analytics/overview')).data;
   check('analítica con orígenes y mensajes', Array.isArray(an.sources) && an.messagesPerDay.length === 8);

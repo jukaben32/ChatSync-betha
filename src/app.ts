@@ -4,12 +4,13 @@ import cors from '@fastify/cors';
 import { PrismaClient } from '@prisma/client';
 import { whatsappRoutes } from './whatsapp/webhook.js';
 import { apiRoutes } from './api/routes.js';
-import { authHook, usageLogHook } from './auth.js';
+import { authHook, maskHook, usageLogHook } from './auth.js';
 
 export const prisma = new PrismaClient();
 
 export const app = Fastify({
   logger: true,
+  bodyLimit: 5 * 1024 * 1024,
 });
 
 // Conserva el cuerpo crudo: Meta firma el payload (X-Hub-Signature-256) y hay que validarlo byte a byte.
@@ -32,6 +33,7 @@ app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string
 app.register(cors, { origin: true });
 app.addHook('onRequest', authHook);
 app.addHook('onResponse', usageLogHook);
+app.addHook('onSend', maskHook);
 app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 app.register(apiRoutes);
 

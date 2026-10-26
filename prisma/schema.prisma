@@ -24,6 +24,8 @@ model Subscriber {
   jobs           ScheduledJob[]
   flowSessions   FlowSession[]
   lists          AudienceListMember[]
+  formSubmissions FormSubmission[]
+  appointments   Appointment[]
   blocked        Boolean  @default(false)
   optedOut       Boolean  @default(false)
   source         String?  @db.VarChar(64)
@@ -59,6 +61,7 @@ model Conversation {
   assignedTo    String?       @db.VarChar(64)
   followUpAt    DateTime?     @db.Timestamptz
   unread        Boolean       @default(false)
+  nudges        Int           @default(0)
   important     Boolean       @default(false)
   channel       String        @default("whatsapp") @db.VarChar(32)
   messages      Message[]
@@ -149,6 +152,7 @@ model Broadcast {
   recipients  BroadcastRecipient[]
   mediaUrl    String?       @db.VarChar(1024)
   buttons     Json          @default("[]")
+  clickedCount Int          @default(0)
   createdAt   DateTime      @default(now()) @db.Timestamptz
   updatedAt   DateTime      @updatedAt @db.Timestamptz
 }
@@ -187,6 +191,8 @@ model BroadcastRecipient {
   providerMessageId String?    @db.VarChar(128)
   status            String     @default("queued") @db.VarChar(32) // queued | sent | delivered | read | failed
   error             String?    @db.Text
+  clickedAt         DateTime?  @db.Timestamptz
+  clickedButton     String?    @db.VarChar(64)
   createdAt         DateTime   @default(now()) @db.Timestamptz
 
   @@index([broadcastId, status])
@@ -212,6 +218,8 @@ model TeamMember {
   name      String   @db.VarChar(255)
   email     String?  @db.VarChar(320)
   role      String   @default("agent") @db.VarChar(32) // admin | agent
+  passwordHash String? @db.VarChar(255)
+  active    Boolean  @default(true)
   createdAt DateTime @default(now()) @db.Timestamptz
 }
 
@@ -221,6 +229,7 @@ model KnowledgeSource {
   title     String   @db.VarChar(255)
   sourceUrl String?  @db.VarChar(1024)
   content   String   @db.Text
+  chunks    KnowledgeChunk[]
   createdAt DateTime @default(now()) @db.Timestamptz
 }
 
@@ -338,4 +347,66 @@ model AudienceListMember {
 
   @@id([listId, subscriberId])
   @@index([subscriberId])
+}
+
+model KnowledgeChunk {
+  id         String          @id @default(uuid()) @db.Uuid
+  sourceId   String          @db.Uuid
+  source     KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  position   Int
+  text       String          @db.Text
+
+  @@index([sourceId])
+}
+
+model Form {
+  id          String           @id @default(uuid()) @db.Uuid
+  name        String           @db.VarChar(255)
+  keyword     String?          @db.VarChar(128)
+  intro       String?          @db.Text
+  doneMessage String           @default("¡Gracias! Hemos recibido tus respuestas.") @db.Text
+  questions   Json             @default("[]") // [{ key, label, type: text|number|email|phone|date|choice, options?: string[], required }]
+  labelOnDone String?          @db.VarChar(128)
+  active      Boolean          @default(true)
+  sequenceId  String?          @db.Uuid // flujo compilado a partir del formulario
+  submissions FormSubmission[]
+  createdAt   DateTime         @default(now()) @db.Timestamptz
+}
+
+model FormSubmission {
+  id           String     @id @default(uuid()) @db.Uuid
+  formId       String     @db.Uuid
+  form         Form       @relation(fields: [formId], references: [id], onDelete: Cascade)
+  subscriberId String     @db.Uuid
+  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  answers      Json
+  createdAt    DateTime   @default(now()) @db.Timestamptz
+
+  @@index([formId, createdAt])
+}
+
+model Appointment {
+  id           String     @id @default(uuid()) @db.Uuid
+  subscriberId String     @db.Uuid
+  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  startsAt     DateTime   @db.Timestamptz
+  endsAt       DateTime   @db.Timestamptz
+  status       String     @default("booked") @db.VarChar(16) // booked | cancelled | completed | no_show
+  title        String?    @db.VarChar(255)
+  notes        String?    @db.Text
+  createdAt    DateTime   @default(now()) @db.Timestamptz
+
+  @@index([startsAt])
+  @@index([subscriberId])
+}
+
+model LoginLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actor     String   @db.VarChar(255)
+  role      String   @db.VarChar(16)
+  ip        String?  @db.VarChar(64)
+  ok        Boolean
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([createdAt])
 }

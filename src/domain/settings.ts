@@ -41,13 +41,44 @@ export interface SandboxSettings {
   enabled: boolean;
 }
 
+export interface BookingSettings {
+  enabled: boolean;
+  timezone: string;
+  slotMinutes: number;
+  /** Aviso mínimo: no se ofrecen huecos que empiecen antes de dentro de N horas. */
+  minNoticeHours: number;
+  maxDaysAhead: number;
+  title: string;
+  days: Record<'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun', DayHours>;
+  /** Horas antes de la cita a las que se envía un recordatorio. */
+  reminderHours: number[];
+  /** Plantilla aprobada para recordatorios ({{1}} = fecha, {{2}} = hora). Sin plantilla se envía texto libre, que WhatsApp solo admite dentro de las 24 h. */
+  reminderTemplate: string;
+  reminderLanguage: string;
+}
+
+export interface SecuritySettings {
+  /** IPs (o rangos IPv4 con /) desde las que se permite entrar. Vacío = cualquier IP. */
+  ipAllowlist: string[];
+}
+
+export interface FollowUpSettings {
+  enabled: boolean;
+  /** Horas de silencio del cliente antes de enviar el recordatorio (debe ser < 24 para seguir dentro de la ventana de WhatsApp). */
+  afterHours: number;
+  maxNudges: number;
+  /** Texto fijo si la IA no está activa. {{name}} se sustituye por el nombre. */
+  message: string;
+  useAi: boolean;
+}
+
 export interface AssignmentSettings {
   mode: 'manual' | 'round_robin';
 }
 
 const DEFAULT_DAY: DayHours = { enabled: true, start: '09:00', end: '18:00' };
 
-export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignment: AssignmentSettings; sandbox: SandboxSettings; agent: AgentSettings } = {
+export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignment: AssignmentSettings; sandbox: SandboxSettings; agent: AgentSettings; booking: BookingSettings; security: SecuritySettings; followups: FollowUpSettings } = {
   businessHours: {
     enabled: false,
     timezone: 'America/Santo_Domingo',
@@ -67,6 +98,28 @@ export const DEFAULTS: { businessHours: BusinessHours; ai: AiSettings; assignmen
   assignment: { mode: 'manual' },
   sandbox: { enabled: false },
   agent: { signature: '', translateLanguage: 'es' },
+  security: { ipAllowlist: [] },
+  followups: { enabled: false, afterHours: 4, maxNudges: 2, message: 'Hola {{name}}, ¿pudiste ver mi último mensaje? Si necesitas algo, estoy aquí para ayudarte.', useAi: true },
+  booking: {
+    enabled: false,
+    timezone: 'America/Santo_Domingo',
+    slotMinutes: 30,
+    minNoticeHours: 2,
+    maxDaysAhead: 14,
+    title: 'Cita',
+    days: {
+      mon: { enabled: true, start: '09:00', end: '17:00' },
+      tue: { enabled: true, start: '09:00', end: '17:00' },
+      wed: { enabled: true, start: '09:00', end: '17:00' },
+      thu: { enabled: true, start: '09:00', end: '17:00' },
+      fri: { enabled: true, start: '09:00', end: '17:00' },
+      sat: { enabled: false, start: '09:00', end: '13:00' },
+      sun: { enabled: false, start: '09:00', end: '13:00' },
+    },
+    reminderHours: [24, 2],
+    reminderTemplate: '',
+    reminderLanguage: 'es',
+  },
 };
 
 export type SettingKey = keyof typeof DEFAULTS;

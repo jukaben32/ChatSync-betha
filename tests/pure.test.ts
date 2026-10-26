@@ -98,3 +98,42 @@ describe('filtros de contactos', () => {
     expect(subscriberWhere({ q: 'ana' }).OR).toHaveLength(3);
   });
 });
+
+import { chunkText, rankChunks, tokenize } from '../src/ai/knowledge.js';
+
+describe('base de conocimiento por fragmentos', () => {
+  it('tokeniza sin tildes ni palabras vacías', () => {
+    expect(tokenize('¿Cuál es el horario de atención?')).toEqual(['horar', 'atenc']);
+  });
+
+  it('un texto corto es un solo fragmento', () => {
+    expect(chunkText('Hola mundo')).toEqual(['Hola mundo']);
+    expect(chunkText('   ')).toEqual([]);
+  });
+
+  it('un texto largo se parte en fragmentos acotados que cubren todo el contenido', () => {
+    const text = Array.from({ length: 60 }, (_, i) => `Esta es la frase número ${i} sobre un tema distinto cada vez.`).join(' ');
+    const chunks = chunkText(text, 400, 60);
+    expect(chunks.length).toBeGreaterThan(5);
+    expect(Math.max(...chunks.map((c) => c.length))).toBeLessThanOrEqual(480);
+    for (const n of [0, 30, 59]) expect(chunks.some((c) => c.includes(`número ${n} `))).toBe(true);
+  });
+
+  it('un párrafo gigante sin puntos también se corta', () => {
+    const chunks = chunkText('palabra '.repeat(1000), 500, 50);
+    expect(chunks.length).toBeGreaterThan(5);
+    expect(chunks.every((c) => c.length <= 560)).toBe(true);
+  });
+
+  it('recupera el fragmento relevante para la pregunta', () => {
+    const chunks = [
+      { id: '1', title: 'Horarios', text: 'Atendemos de lunes a viernes de 9 a 18 horas. Los sábados cerramos a las 13.' },
+      { id: '2', title: 'Envíos', text: 'El envío a domicilio tarda 3 días hábiles y cuesta 5 dólares.' },
+      { id: '3', title: 'Devoluciones', text: 'Aceptamos devoluciones durante 7 días con el empaque original.' },
+    ];
+    expect(rankChunks('¿A qué hora abren los sábados?', chunks, 1)[0].id).toBe('1');
+    expect(rankChunks('cuánto tarda el envío', chunks, 1)[0].id).toBe('2');
+    expect(rankChunks('puedo devolver mi compra', chunks, 1)[0].id).toBe('3');
+    expect(rankChunks('xyz qwerty', chunks)).toEqual([]);
+  });
+});

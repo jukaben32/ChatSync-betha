@@ -2,17 +2,20 @@ import { randomBytes } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
 import { config } from '../config.js';
-import { SCOPES, sha256 } from '../auth.js';
+import { SCOPES, clientIp, ipAllowed, invalidateIpCache, sha256, validIpRule } from '../auth.js';
+import { hashPassword } from '../util/password.js';
 import { processDueJobs } from '../domain/sequences.js';
 import { processScheduledBroadcasts } from '../domain/broadcasts.js';
+import { processSmartFollowUps } from '../domain/followups.js';
 import { emitEvent } from '../domain/events.js';
 import { DEFAULTS, getSetting, setSetting } from '../domain/settings.js';
 import type { SettingKey } from '../domain/settings.js';
 import { assertPublicUrl } from '../util/net.js';
 import { handleInbound } from '../domain/inbound.js';
+import { extractFileText, indexSource, searchKnowledge } from '../ai/knowledge.js';
 
 // Tres interruptores independientes en ChatSyncs (entrante, saliente, estado); aquí se eligen por evento.
-const EVENTS = ['message.received', 'message.sent', 'message.status', 'subscriber.created', 'conversation.updated', 'broadcast.sent'];
+const EVENTS = ['message.received', 'message.sent', 'message.status', 'subscriber.created', 'conversation.updated', 'broadcast.sent', 'form.submitted', 'appointment.booked'];
 
 function htmlToText(html: string) {
   return html
@@ -41,6 +44,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     assignment: await getSetting('assignment'),
     sandbox: await getSetting('sandbox'),
     agent: await getSetting('agent'),
+    booking: await getSetting('booking'),
+    security: await getSetting('security'),
+    followups: await getSetting('followups'),
   }));
 
   app.put('/api/settings/:key', async (request, reply) => {
@@ -48,7 +54,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     if (!(key in DEFAULTS)) return reply.code(404).send({ error: 'unknown_setting' });
     const body = request.body as Record<string, unknown>;
     if (!body || typeof body !== 'object') return reply.code(400).send({ error: 'object body required' });
-    if (key === 'businessHours') {
+    if (key === 'businessHours' || key === 'booking') {
       const tz = String(body.timezone ?? '');
       try {
         new Intl.DateTimeFormat('en-US', { timeZone: tz });
@@ -56,18 +62,78 @@ export async function settingsRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: 'invalid_timezone' });
       }
     }
+    if (key === 'security') {
+      const rules = (Array.isArray(body.ipAllowlist) ? body.ipAllowlist : []).map((r) => String(r).trim()).filter(Boolean);
+      const bad = rules.find((r) => !validIpRule(r));
+      if (bad) return reply.code(400).send({ error: 'invalid_ip_rule', message: `«${bad}» no es una IP ni un rango válido (usa 203.0.113.5 o 203.0.113.0/24).` });
+      const ip = clientIp(request);
+      // No permitir guardar una lista que deje fuera a quien la está guardando
+      if (rules.length && !ipAllowed(ip, rules)) return reply.code(400).send({ error: 'would_lock_you_out', yourIp: ip, message: `Tu IP actual (${ip}) no está en la lista: te quedarías sin acceso. Añádela primero.` });
+      await setSetting('security', { ipAllowlist: rules });
+      invalidateIpCache();
+      return getSetting('security');
+    }
     await setSetting(key as SettingKey, body);
     return getSetting(key as SettingKey);
   });
 
-  // ---------- Equipo ----------
-  app.get('/api/team', async () => prisma.teamMember.findMany({ orderBy: { createdAt: 'asc' } }));
-  app.post('/api/team', async (request, reply) => {
-    const body = request.body as { name?: string; email?: string; role?: string };
-    if (!body.name) return reply.code(400).send({ error: 'name is required' });
-    const member = await prisma.teamMember.create({ data: { name: body.name, email: body.email, role: body.role === 'admin' ? 'admin' : 'agent' } });
-    return reply.code(201).send(member);
+  // ---------- Equipo (personas que atienden; con email y contraseña pueden entrar al panel) ----------
+  const memberView = (m: { id: string; name: string; email: string | null; role: string; active: boolean; passwordHash: string | null; createdAt: Date }, hideEmail: boolean) => ({
+    id: m.id,
+    name: m.name,
+    email: hideEmail ? null : m.email,
+    role: m.role,
+    active: m.active,
+    hasPassword: Boolean(m.passwordHash),
+    createdAt: m.createdAt,
   });
+
+  app.get('/api/team', async (request) => {
+    const members = await prisma.teamMember.findMany({ orderBy: { createdAt: 'asc' } });
+    return members.map((m) => memberView(m, request.actor?.role === 'agent'));
+  });
+
+  app.post('/api/team', async (request, reply) => {
+    const body = request.body as { name?: string; email?: string; role?: string; password?: string };
+    if (!body.name?.trim()) return reply.code(400).send({ error: 'name is required' });
+    const email = body.email?.trim().toLowerCase() || null;
+    if (body.password !== undefined && body.password !== '') {
+      if (!email) return reply.code(400).send({ error: 'email_required', message: 'Para que pueda entrar necesita un email.' });
+      if (body.password.length < 8) return reply.code(400).send({ error: 'weak_password', message: 'La contraseña debe tener al menos 8 caracteres.' });
+    }
+    if (email && (await prisma.teamMember.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }))) return reply.code(409).send({ error: 'email_in_use' });
+    const member = await prisma.teamMember.create({
+      data: { name: body.name.trim(), email, role: body.role === 'admin' ? 'admin' : 'agent', passwordHash: body.password ? hashPassword(body.password) : null },
+    });
+    return reply.code(201).send(memberView(member, false));
+  });
+
+  app.patch('/api/team/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { name?: string; email?: string | null; role?: string; active?: boolean; password?: string };
+    const current = await prisma.teamMember.findUnique({ where: { id } });
+    if (!current) return reply.code(404).send({ error: 'member_not_found' });
+    const email = body.email === undefined ? undefined : body.email?.trim().toLowerCase() || null;
+    if (email && email !== current.email?.toLowerCase() && (await prisma.teamMember.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, NOT: { id } } }))) {
+      return reply.code(409).send({ error: 'email_in_use' });
+    }
+    if (body.password) {
+      if (body.password.length < 8) return reply.code(400).send({ error: 'weak_password', message: 'La contraseña debe tener al menos 8 caracteres.' });
+      if (!(email ?? current.email)) return reply.code(400).send({ error: 'email_required', message: 'Para que pueda entrar necesita un email.' });
+    }
+    const member = await prisma.teamMember.update({
+      where: { id },
+      data: {
+        name: body.name?.trim() || undefined,
+        ...(email !== undefined ? { email } : {}),
+        ...(body.role ? { role: body.role === 'admin' ? 'admin' : 'agent' } : {}),
+        ...(body.active !== undefined ? { active: body.active } : {}),
+        ...(body.password ? { passwordHash: hashPassword(body.password) } : {}),
+      },
+    });
+    return memberView(member, false);
+  });
+
   app.delete('/api/team/:id', async (request) => {
     const { id } = request.params as { id: string };
     await prisma.teamMember.delete({ where: { id } });
@@ -112,7 +178,7 @@ export async function settingsRoutes(app: FastifyInstance) {
 
   // ---------- Base de conocimiento (AI Agent) ----------
   app.get('/api/knowledge', async () =>
-    prisma.knowledgeSource.findMany({ select: { id: true, type: true, title: true, sourceUrl: true, createdAt: true }, orderBy: { createdAt: 'desc' } }),
+    prisma.knowledgeSource.findMany({ select: { id: true, type: true, title: true, sourceUrl: true, createdAt: true, _count: { select: { chunks: true } } }, orderBy: { createdAt: 'desc' } }),
   );
   app.post('/api/knowledge', async (request, reply) => {
     const body = request.body as { type?: 'text' | 'url' | 'sheet'; title?: string; content?: string; url?: string };
@@ -135,11 +201,38 @@ export async function settingsRoutes(app: FastifyInstance) {
       const source = await prisma.knowledgeSource.create({
         data: { type: sheet ? 'sheet' : 'url', title: body.title || target.hostname, sourceUrl: target.toString(), content: text },
       });
-      return reply.code(201).send({ id: source.id, title: source.title, chars: text.length });
+      const chunks = await indexSource(source.id, text);
+      return reply.code(201).send({ id: source.id, title: source.title, chars: text.length, chunks });
     }
     if (!body.title || !body.content) return reply.code(400).send({ error: 'title and content are required' });
-    const source = await prisma.knowledgeSource.create({ data: { type: 'text', title: body.title, content: body.content.slice(0, 20_000) } });
-    return reply.code(201).send({ id: source.id, title: source.title });
+    const source = await prisma.knowledgeSource.create({ data: { type: 'text', title: body.title, content: body.content.slice(0, 200_000) } });
+    return reply.code(201).send({ id: source.id, title: source.title, chunks: await indexSource(source.id, source.content) });
+  });
+
+  // Qué fragmentos recibiría la IA ante una pregunta (sirve para comprobar que el conocimiento está bien cargado)
+  app.get('/api/knowledge/search', async (request, reply) => {
+    const q = request.query as { q?: string };
+    if (!q.q?.trim()) return reply.code(400).send({ error: 'q is required' });
+    return { query: q.q, results: await searchKnowledge(q.q.slice(0, 500)) };
+  });
+
+  // Archivo (PDF o texto) enviado en base64 desde el panel; máx. ~3 MB por el límite de 4,5 MB de las funciones de Vercel
+  app.post('/api/knowledge/file', async (request, reply) => {
+    const body = request.body as { filename?: string; contentBase64?: string; title?: string };
+    if (!body.filename || !body.contentBase64) return reply.code(400).send({ error: 'filename and contentBase64 are required' });
+    const data = Buffer.from(body.contentBase64, 'base64');
+    if (!data.length) return reply.code(400).send({ error: 'empty_file' });
+    if (data.length > 3_200_000) return reply.code(413).send({ error: 'file_too_large', maxBytes: 3_200_000 });
+    let text: string;
+    try {
+      text = (await extractFileText(body.filename, data)).trim();
+    } catch (e) {
+      const unsupported = (e as Error).message === 'unsupported_file_type';
+      return reply.code(unsupported ? 415 : 422).send({ error: unsupported ? 'unsupported_file_type' : 'unreadable_file', message: 'Admitimos PDF, TXT, MD, CSV, JSON y HTML.' });
+    }
+    if (!text) return reply.code(422).send({ error: 'no_text_found', message: 'El archivo no tiene texto extraíble (¿es un PDF escaneado?).' });
+    const source = await prisma.knowledgeSource.create({ data: { type: 'file', title: body.title?.trim() || body.filename, content: text.slice(0, 500_000) } });
+    return reply.code(201).send({ id: source.id, title: source.title, chars: text.length, chunks: await indexSource(source.id, source.content) });
   });
   app.delete('/api/knowledge/:id', async (request) => {
     const { id } = request.params as { id: string };
@@ -220,7 +313,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       prisma.conversation.count({ where: { followUpAt: { lte: new Date() }, status: { in: ['open', 'pending'] } } }),
       prisma.subscriber.findMany({ where: { createdAt: { gte: since30 } }, select: { createdAt: true }, take: 20_000 }),
       prisma.subscriber.count({ where: { OR: [{ optedOut: true }, { blocked: true }], updatedAt: { gte: since30 } } }),
-      prisma.broadcast.findMany({ where: { createdAt: { gte: since30 } }, select: { status: true, sentCount: true, readCount: true, failedCount: true } }),
+      prisma.broadcast.findMany({ where: { createdAt: { gte: since30 } }, select: { status: true, sentCount: true, readCount: true, failedCount: true, clickedCount: true } }),
     ]);
     const growth = new Map<string, number>();
     for (let i = 0; i < 31; i++) growth.set(new Date(since30.getTime() + i * 86_400_000).toISOString().slice(0, 10), 0);
@@ -263,12 +356,34 @@ export async function settingsRoutes(app: FastifyInstance) {
         completed: b30.filter((b) => b.status === 'sent').length,
         messagesSent: b30sent,
         failed: b30.reduce((n, b) => n + b.failedCount, 0),
+        clicks: b30.reduce((n, b) => n + b.clickedCount, 0),
         avgOpenRate: b30sent ? Math.round((b30read / b30sent) * 100) : 0,
       },
       deals: deals.map((d) => ({ stage: d.stage, count: d._count, value: d._sum.value ?? 0 })),
       labels: labels.map((l) => ({ name: l.name, subscribers: l._count.subscribers })),
       sources: sources.map((s) => ({ source: s.source ?? 'desconocido', subscribers: s._count })),
     };
+  });
+
+  // Origen de los leads (anuncios Click-to-WhatsApp, importaciones, workflows…) y cuántos acabaron en una oportunidad ganada
+  app.get('/api/analytics/sources', async () => {
+    const [groups, won] = await Promise.all([
+      prisma.subscriber.groupBy({ by: ['source'], _count: true }),
+      prisma.crmDeal.findMany({ where: { stage: 'won' }, select: { value: true, subscriber: { select: { source: true } } } }),
+    ]);
+    const wonBy = new Map<string, { count: number; value: number }>();
+    for (const d of won) {
+      const k = d.subscriber.source ?? 'desconocido';
+      const cur = wonBy.get(k) ?? { count: 0, value: 0 };
+      wonBy.set(k, { count: cur.count + 1, value: cur.value + d.value });
+    }
+    return groups
+      .map((g) => {
+        const source = g.source ?? 'desconocido';
+        const w = wonBy.get(source) ?? { count: 0, value: 0 };
+        return { source, kind: source.startsWith('ctwa:') ? 'anuncio' : source.split(':')[0], subscribers: g._count, won: w.count, wonValue: w.value, conversion: g._count ? Math.round((w.count / g._count) * 100) : 0 };
+      })
+      .sort((a, b) => b.subscribers - a.subscribers);
   });
 
   // ---------- Cron (Vercel Cron o un disparador externo envían Authorization: Bearer $CRON_SECRET) ----------
@@ -279,6 +394,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     const broadcasts = await processScheduledBroadcasts();
     // Las sesiones de flujo caducan a las 24 h (fin de la ventana de servicio de WhatsApp)
     const expired = await prisma.flowSession.updateMany({ where: { status: 'active', updatedAt: { lt: new Date(Date.now() - 86_400_000) } }, data: { status: 'expired' } });
-    return { ok: true, jobs, broadcasts, expiredSessions: expired.count };
+    const followups = await processSmartFollowUps();
+    return { ok: true, jobs, broadcasts, followups, expiredSessions: expired.count };
   });
 }

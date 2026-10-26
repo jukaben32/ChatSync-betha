@@ -2,14 +2,8 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
 import { addLabelWithTriggers, removeLabel } from '../domain/labels.js';
 import { triggerSequenceForSubscriber } from '../domain/sequences.js';
-import { subscriberWhere } from '../domain/subscriber-filters.js';
-
-const csvCell = (v: unknown) => {
-  const s = v === undefined || v === null ? '' : String(v);
-  // Neutraliza fórmulas (=, +, -, @) para que Excel/Sheets no las ejecuten al abrir el CSV
-  const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
-  return /[",\n\r;]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-};
+import { subRef, subscriberWhere } from '../domain/subscriber-filters.js';
+import { csvCell } from '../util/csv.js';
 
 type BulkAction = 'add_label' | 'remove_label' | 'add_list' | 'remove_list' | 'block' | 'unblock' | 'unsubscribe' | 'resubscribe' | 'delete' | 'enroll_sequence';
 const BULK_ACTIONS: BulkAction[] = ['add_label', 'remove_label', 'add_list', 'remove_list', 'block', 'unblock', 'unsubscribe', 'resubscribe', 'delete', 'enroll_sequence'];
@@ -139,7 +133,7 @@ export async function contactRoutes(app: FastifyInstance) {
   app.post('/api/subscribers/:phone/lists', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const body = request.body as { lists?: string[] };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     for (const raw of body.lists ?? []) {
       const name = raw.trim();
@@ -156,7 +150,7 @@ export async function contactRoutes(app: FastifyInstance) {
 
   app.delete('/api/subscribers/:phone/lists/:listId', async (request, reply) => {
     const { phone, listId } = request.params as { phone: string; listId: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     await prisma.audienceListMember.deleteMany({ where: { subscriberId: subscriber.id, listId } });
     return { ok: true };
@@ -165,7 +159,7 @@ export async function contactRoutes(app: FastifyInstance) {
   // ---------- Secuencias y flujos del contacto ----------
   app.post('/api/subscribers/:phone/reset-input-flow', async (request, reply) => {
     const { phone } = request.params as { phone: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     const r = await prisma.flowSession.updateMany({ where: { subscriberId: subscriber.id, status: 'active' }, data: { status: 'done' } });
     return { ok: true, closed: r.count };
@@ -173,7 +167,7 @@ export async function contactRoutes(app: FastifyInstance) {
 
   app.delete('/api/subscribers/:phone/sequences/:sequenceId', async (request, reply) => {
     const { phone, sequenceId } = request.params as { phone: string; sequenceId: string };
-    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    const subscriber = await prisma.subscriber.findUnique({ where: subRef(phone) });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     await prisma.subscriberSequence.updateMany({ where: { subscriberId: subscriber.id, sequenceId }, data: { status: 'stopped' } });
     await prisma.scheduledJob.updateMany({ where: { subscriberId: subscriber.id, sequenceId, status: 'pending' }, data: { status: 'cancelled' } });
