@@ -108,7 +108,7 @@ export default function Contacts() {
                         <Avatar text={initials(s.name, s.phone)} />
                         <div>
                           <strong>{s.name || '—'}</strong>
-                          <div className="muted">{s.email}</div>
+                          <div className="muted">{s.email}{s.source && s.source !== 'whatsapp' ? ` · ${s.source}` : ''}</div>
                         </div>
                       </div>
                     </td>
@@ -180,6 +180,9 @@ function AddContact({ onClose, onSaved }: { onClose: () => void; onSaved: () => 
 function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Subscriber; onClose: () => void; onChanged: () => void }) {
   const detail = useAsync(() => api<Subscriber & { notes: { id: string; body: string; author: string }[] }>(`/api/subscribers/${subscriber.phone}`), [subscriber.phone])
   const [newLabel, setNewLabel] = useState('')
+  const [fieldKey, setFieldKey] = useState('')
+  const [fieldValue, setFieldValue] = useState('')
+  const defs = useAsync(() => api<{ key: string; label: string }[]>('/api/custom-fields'))
   const s = detail.data ?? subscriber
 
   async function addLabel() {
@@ -191,6 +194,13 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Subscri
   }
   async function removeLabel(id: string) {
     await api(`/api/subscribers/${s.phone}/labels/${id}`, { method: 'DELETE' })
+    detail.reload()
+    onChanged()
+  }
+  async function setField(key: string, value: string) {
+    await api(`/api/subscribers/${s.phone}`, { method: 'PATCH', body: { customFields: { [key]: value } } })
+    setFieldKey('')
+    setFieldValue('')
     detail.reload()
     onChanged()
   }
@@ -234,6 +244,27 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Subscri
         <input className="grow" placeholder="Nueva etiqueta" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addLabel()} />
         <button className="btn" onClick={addLabel}>
           Añadir
+        </button>
+      </div>
+      <h3 style={{ margin: '16px 0 6px' }}>Campos personalizados</h3>
+      {Object.entries(s.customFields ?? {}).length > 0 && (
+        <table style={{ marginBottom: 8 }}>
+          <tbody>
+            {Object.entries(s.customFields ?? {}).map(([k, v]) => (
+              <tr key={k}>
+                <td className="mono">{k}</td>
+                <td>{String(v)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="row" style={{ flexWrap: 'nowrap' }}>
+        <input list="contact-fields" style={{ width: 140 }} placeholder="campo" value={fieldKey} onChange={(e) => setFieldKey(e.target.value)} />
+        <datalist id="contact-fields">{defs.data?.map((d) => <option key={d.key} value={d.key} />)}</datalist>
+        <input className="grow" placeholder="valor" value={fieldValue} onChange={(e) => setFieldValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fieldKey.trim() && setField(fieldKey.trim(), fieldValue)} />
+        <button className="btn" disabled={!fieldKey.trim()} onClick={() => setField(fieldKey.trim(), fieldValue)}>
+          Guardar
         </button>
       </div>
       <h3 style={{ margin: '16px 0 6px' }}>Preferencias</h3>

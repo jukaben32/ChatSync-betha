@@ -14,6 +14,7 @@ import CRM from './pages/CRM'
 import Integrations from './pages/Integrations'
 import Team from './pages/Team'
 import Settings from './pages/Settings'
+import Workflows from './pages/Workflows'
 
 const NAV: { group: string; items: { to: string; icon: string; label: string }[] }[] = [
   {
@@ -30,6 +31,7 @@ const NAV: { group: string; items: { to: string; icon: string; label: string }[]
     items: [
       { to: '/broadcasts', icon: '📣', label: 'Broadcasts' },
       { to: '/automations', icon: '⚡', label: 'Secuencias y flujos' },
+      { to: '/workflows', icon: '↯', label: 'Webhook Workflows' },
       { to: '/templates', icon: '📄', label: 'Plantillas' },
       { to: '/ai', icon: '✦', label: 'Agente IA' },
     ],
@@ -39,7 +41,7 @@ const NAV: { group: string; items: { to: string; icon: string; label: string }[]
     items: [
       { to: '/integrations', icon: '🔌', label: 'Webhooks y API' },
       { to: '/team', icon: '🧑‍💼', label: 'Equipo' },
-      { to: '/settings', icon: '⚙', label: 'Conexión' },
+      { to: '/settings', icon: '⚙', label: 'Ajustes' },
     ],
   },
 ]
@@ -124,6 +126,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <Route path="/broadcasts" element={<Broadcasts />} />
           <Route path="/automations" element={<Automations />} />
           <Route path="/templates" element={<Templates />} />
+          <Route path="/workflows" element={<Workflows />} />
           <Route path="/ai" element={<AIAgent />} />
           <Route path="/integrations" element={<Integrations />} />
           <Route path="/team" element={<Team />} />

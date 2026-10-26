@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { Broadcast, Label, Template } from '../api'
 import { Badge, Card, Empty, ErrorNote, Field, Modal, Page, useAsync } from '../ui'
 
-const TONE: Record<string, 'gray' | 'amber' | 'green'> = { draft: 'gray', sending: 'amber', sent: 'green' }
-const LABEL: Record<string, string> = { draft: 'Borrador', sending: 'Enviando', sent: 'Enviado' }
+const TONE: Record<string, 'gray' | 'amber' | 'green' | 'blue' | 'red'> = { draft: 'gray', scheduled: 'blue', sending: 'amber', sent: 'green', failed: 'red' }
+const LABEL: Record<string, string> = { draft: 'Borrador', scheduled: 'Programado', sending: 'Enviando', sent: 'Enviado', failed: 'Falló' }
 
 export default function Broadcasts() {
   const list = useAsync(() => api<Broadcast[]>('/api/broadcasts'))
@@ -23,7 +23,7 @@ export default function Broadcasts() {
       setMessage(`Enviado a ${r.audience} contactos: ${r.sentCount} correctos, ${r.failedCount} fallidos.`)
     } catch (e) {
       const m = (e as Error).message
-      setError(m === 'whatsapp_not_configured' ? 'Conecta WhatsApp (Conexión) antes de enviar broadcasts.' : m)
+      setError(m === 'whatsapp_not_configured' ? 'Conecta WhatsApp (Conexión) o activa el modo simulación antes de enviar.' : m)
     } finally {
       setBusy('')
       list.reload()
@@ -34,6 +34,16 @@ export default function Broadcasts() {
     if (!confirm(`Eliminar "${b.name}"?`)) return
     await api(`/api/broadcasts/${b.id}`, { method: 'DELETE' })
     list.reload()
+  }
+
+  const audienceText = (b: Broadcast) => {
+    const a = b.audience ?? {}
+    const parts = [
+      a.labels?.length ? `con ${a.labels.join(', ')}` : '',
+      a.excludeLabels?.length ? `sin ${a.excludeLabels.join(', ')}` : '',
+      a.fields?.length ? `${a.fields.length} filtro(s) de campo` : '',
+    ].filter(Boolean)
+    return parts.length ? parts.join(' · ') : 'Todos'
   }
 
   return (
@@ -57,12 +67,12 @@ export default function Broadcasts() {
               <thead>
                 <tr>
                   <th>Nombre</th>
-                  <th>Tipo</th>
                   <th>Audiencia</th>
                   <th>Estado</th>
                   <th>Enviados</th>
                   <th>Entregados</th>
                   <th>Leídos</th>
+                  <th>Fallidos</th>
                   <th />
                 </tr>
               </thead>
@@ -73,19 +83,20 @@ export default function Broadcasts() {
                       <strong>{b.name}</strong>
                       <div className="muted">{b.contentType === 'template' ? `Plantilla: ${b.content}` : b.content.slice(0, 60)}</div>
                     </td>
-                    <td>{b.contentType === 'template' ? 'Plantilla' : 'Texto'}</td>
-                    <td>{b.audience?.all || !b.audience?.labels?.length ? 'Todos' : b.audience.labels.join(', ')}</td>
+                    <td>{audienceText(b)}</td>
                     <td>
                       <Badge tone={TONE[b.status] ?? 'gray'}>{LABEL[b.status] ?? b.status}</Badge>
+                      {b.status === 'scheduled' && b.scheduledAt && <div className="muted">{new Date(b.scheduledAt).toLocaleString()}</div>}
                     </td>
                     <td>{b.sentCount}</td>
                     <td>{b.deliveredCount}</td>
                     <td>{b.readCount}</td>
+                    <td>{b.failedCount}</td>
                     <td>
                       <div className="row" style={{ justifyContent: 'flex-end' }}>
-                        {b.status === 'draft' && (
+                        {(b.status === 'draft' || b.status === 'scheduled') && (
                           <button className="btn btn-sm btn-primary" disabled={busy === b.id} onClick={() => send(b)}>
-                            {busy === b.id ? 'Enviando…' : 'Enviar'}
+                            {busy === b.id ? 'Enviando…' : 'Enviar ahora'}
                           </button>
                         )}
                         <button className="btn btn-sm btn-danger" onClick={() => remove(b)}>
@@ -113,17 +124,52 @@ export default function Broadcasts() {
   )
 }
 
+interface FieldFilter {
+  field: string
+  op: string
+  value: string
+}
+
 function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const labels = useAsync(() => api<Label[]>('/api/labels'))
   const templates = useAsync(() => api<Template[]>('/api/templates'))
-  const [form, setForm] = useState({ name: '', contentType: 'text', content: '', language: 'es' })
-  const [selected, setSelected] = useState<string[]>([])
+  const [form, setForm] = useState({ name: '', contentType: 'text', content: '', language: 'es', mediaUrl: '' })
+  const [buttons, setButtons] = useState<string[]>([])
+  const [include, setInclude] = useState<string[]>([])
+  const [exclude, setExclude] = useState<string[]>([])
+  const [filters, setFilters] = useState<FieldFilter[]>([])
+  const [when, setWhen] = useState('')
+  const [count, setCount] = useState<number | null>(null)
   const [error, setError] = useState('')
+
+  const audience = {
+    ...(include.length ? { labels: include } : {}),
+    ...(exclude.length ? { excludeLabels: exclude } : {}),
+    ...(filters.length ? { fields: filters.filter((f) => f.field) } : {}),
+    ...(!include.length && !exclude.length && !filters.length ? { all: true } : {}),
+  }
+
+  // Vista previa: cuántos contactos recibirían el envío
+  useEffect(() => {
+    const t = setTimeout(() => {
+      api<{ count: number }>('/api/broadcasts/audience-count', { body: audience })
+        .then((r) => setCount(r.count))
+        .catch(() => setCount(null))
+    }, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(audience)])
 
   async function save() {
     try {
       await api('/api/broadcasts', {
-        body: { ...form, audience: selected.length ? { labels: selected } : { all: true } },
+        body: {
+          ...form,
+          mediaUrl: form.mediaUrl || undefined,
+          buttons: buttons.filter(Boolean).map((title) => ({ title })),
+          audience,
+          scheduledAt: when ? new Date(when).toISOString() : undefined,
+        },
       })
       onSaved()
     } catch (e) {
@@ -132,6 +178,22 @@ function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   }
 
   const approved = templates.data?.filter((t) => t.status === 'approved') ?? []
+  const toggle = (list: string[], set: (v: string[]) => void, name: string) => set(list.includes(name) ? list.filter((n) => n !== name) : [...list, name])
+
+  const chips = (selected: string[], set: (v: string[]) => void, tone: 'badge-green' | 'badge-red') => (
+    <div className="chips">
+      {labels.data?.map((l) => {
+        const on = selected.includes(l.name)
+        return (
+          <button key={l.id} type="button" className={`badge ${on ? tone : 'badge-gray'}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => toggle(selected, set, l.name)}>
+            {on ? '✓ ' : ''}
+            {l.name} · {l._count?.subscribers ?? 0}
+          </button>
+        )
+      })}
+      {labels.data?.length === 0 && <span className="muted">Aún no hay etiquetas.</span>}
+    </div>
+  )
 
   return (
     <Modal
@@ -143,7 +205,7 @@ function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () =
             Cancelar
           </button>
           <button className="btn btn-primary" onClick={save} disabled={!form.name.trim() || !form.content.trim()}>
-            Guardar borrador
+            {when ? 'Programar' : 'Guardar borrador'}
           </button>
         </>
       }
@@ -176,29 +238,64 @@ function NewBroadcast({ onClose, onSaved }: { onClose: () => void; onSaved: () =
           </select>
         </Field>
       ) : (
-        <Field label="Mensaje">
-          <textarea value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} />
-        </Field>
+        <>
+          <Field label="Mensaje" hint="Variables: {{name}}, {{phone}}, {{campo_personalizado}}">
+            <textarea value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} />
+          </Field>
+          <Field label="Imagen (URL https, opcional)" hint="Si la añades, el mensaje se envía como imagen con este texto.">
+            <input value={form.mediaUrl} onChange={(e) => setForm({ ...form, mediaUrl: e.target.value })} placeholder="https://…" />
+          </Field>
+          {!form.mediaUrl && (
+            <Field label="Botones de respuesta rápida (hasta 3)">
+              <div className="grid" style={{ gap: 6 }}>
+                {buttons.map((b, i) => (
+                  <div className="row" key={i} style={{ flexWrap: 'nowrap' }}>
+                    <input className="grow" maxLength={20} value={b} placeholder={`Botón ${i + 1}`} onChange={(e) => setButtons(buttons.map((x, idx) => (idx === i ? e.target.value : x)))} />
+                    <button className="icon-btn" aria-label="Quitar botón" onClick={() => setButtons(buttons.filter((_, idx) => idx !== i))}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                {buttons.length < 3 && (
+                  <button className="btn btn-sm" style={{ width: 'fit-content' }} onClick={() => setButtons([...buttons, ''])}>
+                    + Botón
+                  </button>
+                )}
+              </div>
+            </Field>
+          )}
+        </>
       )}
-      <Field label="Audiencia" hint={selected.length ? 'Solo contactos con alguna de estas etiquetas.' : 'Sin etiquetas seleccionadas se envía a todos los contactos activos.'}>
-        <div className="chips">
-          {labels.data?.map((l) => {
-            const on = selected.includes(l.name)
-            return (
-              <button
-                key={l.id}
-                type="button"
-                className={`badge ${on ? 'badge-green' : 'badge-gray'}`}
-                style={{ border: 0, cursor: 'pointer' }}
-                onClick={() => setSelected(on ? selected.filter((n) => n !== l.name) : [...selected, l.name])}
-              >
-                {on ? '✓ ' : ''}
-                {l.name} · {l._count?.subscribers ?? 0}
+
+      <h3 style={{ margin: '4px 0 8px' }}>Audiencia</h3>
+      <Field label="Incluir contactos con alguna de estas etiquetas">{chips(include, setInclude, 'badge-green')}</Field>
+      <Field label="Excluir contactos con estas etiquetas">{chips(exclude, setExclude, 'badge-red')}</Field>
+      <Field label="Filtrar por campos personalizados">
+        <div className="grid" style={{ gap: 6 }}>
+          {filters.map((f, i) => (
+            <div className="row" key={i} style={{ flexWrap: 'nowrap' }}>
+              <input style={{ width: 120 }} placeholder="campo" value={f.field} onChange={(e) => setFilters(filters.map((x, idx) => (idx === i ? { ...x, field: e.target.value } : x)))} />
+              <select style={{ width: 130 }} value={f.op} onChange={(e) => setFilters(filters.map((x, idx) => (idx === i ? { ...x, op: e.target.value } : x)))} aria-label="Operador">
+                <option value="eq">es igual a</option>
+                <option value="neq">distinto de</option>
+                <option value="contains">contiene</option>
+                <option value="exists">tiene valor</option>
+              </select>
+              {f.op !== 'exists' && <input className="grow" placeholder="valor" value={f.value} onChange={(e) => setFilters(filters.map((x, idx) => (idx === i ? { ...x, value: e.target.value } : x)))} />}
+              <button className="icon-btn" aria-label="Quitar filtro" onClick={() => setFilters(filters.filter((_, idx) => idx !== i))}>
+                ✕
               </button>
-            )
-          })}
-          {labels.data?.length === 0 && <span className="muted">Aún no hay etiquetas.</span>}
+            </div>
+          ))}
+          <button className="btn btn-sm" style={{ width: 'fit-content' }} onClick={() => setFilters([...filters, { field: '', op: 'eq', value: '' }])}>
+            + Filtro
+          </button>
         </div>
+      </Field>
+      <div className="ok-note">{count === null ? 'Calculando audiencia…' : `${count} contacto(s) recibirían este broadcast (se excluyen bloqueados y bajas).`}</div>
+
+      <Field label="Programar envío (opcional)" hint="La tarea programada del servidor lo envía a esa hora. Déjalo vacío para guardarlo como borrador y enviarlo a mano.">
+        <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
       </Field>
     </Modal>
   )

@@ -1,0 +1,22 @@
+# Dispara el trabajo programado del servidor (pasos "esperar", broadcasts programados) cada 5 minutos.
+# Vercel Hobby solo permite un cron diario; GitHub Actions cubre el resto.
+#
+# Configuración (Settings → Secrets and variables → Actions):
+#   secret   CRON_SECRET  = el mismo valor que la variable CRON_SECRET de Vercel
+#   variable APP_URL      = https://chatsyncs-replica.vercel.app
+name: cron-tick
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    if: ${{ vars.APP_URL != '' }}
+    steps:
+      - name: Llamar a /api/cron/tick
+        run: |
+          code=$(curl -sS -o response.json -w '%{http_code}' -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ vars.APP_URL }}/api/cron/tick")
+          cat response.json; echo
+          test "$code" = "200"

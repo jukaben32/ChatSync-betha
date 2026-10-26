@@ -179,6 +179,44 @@ try {
   check('conversación nueva asignada a un miembro', Boolean(assigned?.assignedTo?.includes(tag)), JSON.stringify(assigned?.assignedTo));
   await call('/api/settings/assignment', { method: 'PUT', body: original.assignment });
 
+  console.log('\n11) Servidor MCP');
+  const P5 = `1555${tag}7`;
+  created.phones.push(P5);
+  const rpc = async (method, params, key = KEY, id = 1) => {
+    const res = await fetch(BASE + '/api/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+    });
+    const text = await res.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      /* respuesta no JSON */
+    }
+    return { status: res.status, data };
+  };
+  const callTool = async (name, args) => {
+    const r = await rpc('tools/call', { name, arguments: args });
+    const text = r.data?.result?.content?.[0]?.text;
+    return { isError: Boolean(r.data?.result?.isError), json: text ? JSON.parse(text) : null, status: r.status };
+  };
+  check('MCP sin clave → 401', (await rpc('tools/list', {}, '')).status === 401);
+  await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } });
+  const tools = (await rpc('tools/list', {}, KEY, 2)).data?.result?.tools ?? [];
+  check('MCP lista herramientas reales (≥ 30)', tools.length >= 30 && tools.some((t) => t.name === 'send_text_message'), String(tools.length));
+  await sim(P5, 'hola desde mcp');
+  const sentViaMcp = await callTool('send_text_message', { phone: P5, body: 'Hola desde MCP' });
+  check('send_text_message envía de verdad', sentViaMcp.json?.ok === true && Boolean(sentViaMcp.json?.messageId), JSON.stringify(sentViaMcp.json));
+  check('el mensaje del MCP quedó en la conversación', (await outbound(P5)).some((m) => m.body === 'Hola desde MCP' && m.metadata?.sender === 'mcp'));
+  const info = await callTool('get_account_info', {});
+  check('get_account_info devuelve datos reales', typeof info.json?.counts?.subscribers === 'number', JSON.stringify(info.json));
+  await callTool('assign_custom_fields', { phone: P5, fields: { origen: 'mcp' } });
+  check('assign_custom_fields guarda el dato', (await call(`/api/subscribers/${P5}`)).data.customFields?.origen === 'mcp');
+  const bad = await callTool('get_subscriber', { phone: '000' });
+  check('herramienta con error no rompe el protocolo', bad.status === 200);
+
   console.log('\n10) Analítica y ajustes');
   const an = (await call('/api/analytics/overview')).data;
   check('analítica con orígenes y mensajes', Array.isArray(an.sources) && an.messagesPerDay.length === 8);
