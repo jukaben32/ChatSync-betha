@@ -1,33 +1,70 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, initials, timeAgo } from '../api'
 import type { Conversation } from '../api'
-import { Avatar, Badge, ErrorNote, useAsync } from '../ui'
+import { Avatar, Badge, ErrorNote, Modal, useAsync } from '../ui'
 
 interface Member {
   id: string
   name: string
 }
 
+interface Canned {
+  id: string
+  shortcut: string
+  title: string
+  body: string
+}
+
+interface Insights {
+  summary: string
+  leadScore: number
+  churnRisk: number
+  sentiment: 'positive' | 'neutral' | 'negative'
+  nextBestAction: string
+}
+
+type ConvDetail = Conversation & { windowOpen?: boolean; followUpAt?: string | null }
+
 const STATUS: Record<string, { label: string; tone: 'green' | 'amber' | 'gray' }> = {
   open: { label: 'Abierta', tone: 'green' },
   pending: { label: 'Pendiente', tone: 'amber' },
   solved: { label: 'Resuelta', tone: 'gray' },
+  archived: { label: 'Archivada', tone: 'gray' },
+}
+
+const TABS = [
+  { id: 'open', label: 'Abiertas' },
+  { id: 'mine', label: 'Sin asignar' },
+  { id: 'followup', label: 'Seguimiento' },
+  { id: 'solved', label: 'Resueltas' },
+  { id: 'archived', label: 'Archivadas' },
+]
+
+function queryFor(tab: string, search: string) {
+  const p = new URLSearchParams()
+  if (tab === 'open') p.set('status', 'open')
+  if (tab === 'mine') p.set('assignedTo', 'unassigned')
+  if (tab === 'followup') p.set('followUp', 'due')
+  if (tab === 'solved') p.set('status', 'solved')
+  if (tab === 'archived') p.set('status', 'archived')
+  if (search) p.set('q', search)
+  return p.toString()
 }
 
 export default function Inbox() {
-  const [filter, setFilter] = useState('')
+  const [tab, setTab] = useState('open')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
 
-  const list = useAsync(
-    () => api<Conversation[]>(`/api/conversations?${new URLSearchParams({ ...(filter ? { status: filter } : {}), ...(search ? { q: search } : {}) })}`),
-    [filter, search],
-  )
+  const list = useAsync(() => api<Conversation[]>(`/api/conversations?${queryFor(tab, search)}`), [tab, search])
   const team = useAsync(() => api<Member[]>('/api/team'))
+  const canned = useAsync(() => api<Canned[]>('/api/canned-responses'))
 
-  // Refresco periódico de la lista (sustituye al tiempo real sin websockets en serverless)
+  // Sin websockets en serverless: refresco periódico (más lento si la pestaña está oculta)
   useEffect(() => {
-    const t = setInterval(() => list.reload(), 15000)
+    const t = setInterval(() => {
+      if (!document.hidden) list.reload()
+    }, 12000)
     return () => clearInterval(t)
   }, [list.reload])
 
@@ -36,15 +73,16 @@ export default function Inbox() {
       <div className="inbox-list">
         <div className="inbox-search">
           <input placeholder="Buscar nombre o teléfono…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Estado">
-            <option value="">Todas</option>
-            <option value="open">Abiertas</option>
-            <option value="pending">Pendientes</option>
-            <option value="solved">Resueltas</option>
-          </select>
+          <div className="chips">
+            {TABS.map((t) => (
+              <button key={t.id} className={`badge ${tab === t.id ? 'badge-green' : 'badge-gray'}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setTab(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
         <ErrorNote message={list.error} />
-        {list.data?.length === 0 && <div className="empty">Sin conversaciones. Aparecerán cuando lleguen mensajes por WhatsApp.</div>}
+        {list.data?.length === 0 && <div className="empty">Sin conversaciones en esta vista.</div>}
         {list.data?.map((c) => (
           <button key={c.id} className={`conv ${selected === c.id ? 'active' : ''}`} onClick={() => setSelected(c.id)}>
             <Avatar text={initials(c.subscriber.name, c.subscriber.phone)} />
@@ -63,7 +101,7 @@ export default function Inbox() {
         ))}
       </div>
       {selected ? (
-        <Chat key={selected} id={selected} members={team.data ?? []} onBack={() => setSelected(null)} onChanged={list.reload} />
+        <Chat key={selected} id={selected} members={team.data ?? []} canned={canned.data ?? []} onBack={() => setSelected(null)} onChanged={list.reload} />
       ) : (
         <div className="chat">
           <div className="empty" style={{ margin: 'auto' }}>
@@ -76,15 +114,19 @@ export default function Inbox() {
   )
 }
 
-function Chat({ id, members, onBack, onChanged }: { id: string; members: Member[]; onBack: () => void; onChanged: () => void }) {
-  const conv = useAsync(() => api<Conversation>(`/api/conversations/${id}`), [id])
+function Chat({ id, members, canned, onBack, onChanged }: { id: string; members: Member[]; canned: Canned[]; onBack: () => void; onChanged: () => void }) {
+  const conv = useAsync(() => api<ConvDetail>(`/api/conversations/${id}`), [id])
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [busyAi, setBusyAi] = useState(false)
   const [error, setError] = useState('')
+  const [media, setMedia] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const t = setInterval(() => conv.reload(), 8000)
+    const t = setInterval(() => {
+      if (!document.hidden) conv.reload()
+    }, 8000)
     return () => clearInterval(t)
   }, [conv.reload])
 
@@ -93,16 +135,25 @@ function Chat({ id, members, onBack, onChanged }: { id: string; members: Member[
   }, [conv.data?.messages.length])
 
   const c = conv.data
+  const slash = text.startsWith('/') ? text.slice(1).toLowerCase() : null
+  const matches = slash !== null ? canned.filter((r) => r.shortcut.includes(slash) || r.title.toLowerCase().includes(slash)).slice(0, 5) : []
 
-  async function send() {
-    if (!text.trim()) return
+  async function post(body: unknown) {
     setSending(true)
     setError('')
     try {
-      await api(`/api/conversations/${id}/messages`, { body: { body: text.trim() } })
-      setText('')
+      await api(`/api/conversations/${id}/messages`, { body })
+      return true
     } catch (e) {
-      setError((e as Error).message === 'whatsapp_not_configured' ? 'WhatsApp no está conectado todavía: el mensaje se guardó como fallido.' : (e as Error).message)
+      const m = (e as Error).message
+      setError(
+        m === 'whatsapp_not_configured'
+          ? 'WhatsApp no está conectado todavía: el mensaje quedó guardado como fallido.'
+          : m === 'outside_24h_window'
+            ? 'Han pasado más de 24 h desde el último mensaje del cliente: WhatsApp solo permite plantillas.'
+            : m,
+      )
+      return false
     } finally {
       setSending(false)
       conv.reload()
@@ -110,13 +161,36 @@ function Chat({ id, members, onBack, onChanged }: { id: string; members: Member[
     }
   }
 
-  async function patch(body: { status?: string; assignedTo?: string | null }) {
+  async function send() {
+    if (!text.trim()) return
+    if (await post({ body: text.trim() })) setText('')
+  }
+
+  async function patch(body: { status?: string; assignedTo?: string | null; followUpAt?: string | null }) {
     await api(`/api/conversations/${id}`, { method: 'PATCH', body })
     conv.reload()
     onChanged()
   }
 
+  async function ai(kind: 'suggest' | 'rewrite') {
+    setBusyAi(true)
+    setError('')
+    try {
+      const r =
+        kind === 'suggest'
+          ? await api<{ text: string }>(`/api/conversations/${id}/ai-suggest`, { body: {} })
+          : await api<{ text: string }>('/api/ai/rewrite', { body: { text } })
+      if (r.text) setText(r.text)
+    } catch (e) {
+      setError((e as Error).message === 'agent_disabled' || (e as Error).message.includes('AI_API_KEY') ? 'La IA no está activa: falta AI_API_KEY en Vercel.' : (e as Error).message)
+    } finally {
+      setBusyAi(false)
+    }
+  }
+
   if (!c) return <div className="chat">{conv.error ? <ErrorNote message={conv.error} /> : <div className="empty">Cargando…</div>}</div>
+
+  const followDue = c.followUpAt && new Date(c.followUpAt).getTime() <= Date.now()
 
   return (
     <div className="chat">
@@ -127,26 +201,43 @@ function Chat({ id, members, onBack, onChanged }: { id: string; members: Member[
         <Avatar text={initials(c.subscriber.name, c.subscriber.phone)} />
         <div className="grow">
           <strong>{c.subscriber.name || c.subscriber.phone}</strong>
-          <div className="muted">+{c.subscriber.phone}</div>
+          <div className="muted">
+            +{c.subscriber.phone} {c.subscriber.source && c.subscriber.source !== 'whatsapp' && <Badge tone="blue">{c.subscriber.source}</Badge>}
+          </div>
         </div>
         <select value={c.assignedTo ?? ''} onChange={(e) => patch({ assignedTo: e.target.value || null })} style={{ width: 150 }} aria-label="Asignar a">
           <option value="">Bot / sin asignar</option>
+          {c.assignedTo && !members.some((m) => m.name === c.assignedTo) && <option value={c.assignedTo}>{c.assignedTo}</option>}
           {members.map((m) => (
             <option key={m.id} value={m.name}>
               {m.name}
             </option>
           ))}
         </select>
-        {c.status === 'solved' ? (
+        <input
+          type="datetime-local"
+          aria-label="Seguimiento"
+          title="Recordatorio de seguimiento"
+          style={{ width: 190 }}
+          value={c.followUpAt ? new Date(new Date(c.followUpAt).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
+          onChange={(e) => patch({ followUpAt: e.target.value ? new Date(e.target.value).toISOString() : null })}
+        />
+        {c.status === 'solved' || c.status === 'archived' ? (
           <button className="btn btn-sm" onClick={() => patch({ status: 'open' })}>
             Reabrir
           </button>
         ) : (
-          <button className="btn btn-sm btn-primary" onClick={() => patch({ status: 'solved', assignedTo: null })}>
-            Resolver
-          </button>
+          <>
+            <button className="btn btn-sm btn-primary" onClick={() => patch({ status: 'solved', assignedTo: null })}>
+              Resolver
+            </button>
+            <button className="btn btn-sm" onClick={() => patch({ status: 'archived' })}>
+              Archivar
+            </button>
+          </>
         )}
       </div>
+      {followDue && <div className="warn-note" style={{ margin: 0, borderRadius: 0 }}>Seguimiento pendiente desde {new Date(c.followUpAt!).toLocaleString()}</div>}
       <div className="chat-body">
         {c.messages.length === 0 && <div className="empty">Sin mensajes.</div>}
         {c.messages.map((m) => (
@@ -154,36 +245,112 @@ function Chat({ id, members, onBack, onChanged }: { id: string; members: Member[
             {m.body}
             <small>
               {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              {m.direction === 'outbound' && ` · ${m.status === 'failed' ? 'falló' : m.status === 'read' ? 'leído' : m.status === 'delivered' ? 'entregado' : 'enviado'}`}
+              {m.direction === 'outbound' &&
+                ` · ${(m as { metadata?: { sender?: string } }).metadata?.sender === 'ai' ? 'IA · ' : (m as { metadata?: { sender?: string } }).metadata?.sender === 'bot' ? 'bot · ' : ''}${
+                  m.status === 'failed' ? 'falló' : m.status === 'read' ? 'leído' : m.status === 'delivered' ? 'entregado' : 'enviado'
+                }`}
             </small>
           </div>
         ))}
         <div ref={bottom} />
       </div>
       <div className="composer" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        {c.windowOpen === false && (
+          <div className="warn-note" style={{ marginBottom: 8 }}>
+            Ventana de 24 h cerrada: solo puedes enviar plantillas hasta que el cliente vuelva a escribir.
+          </div>
+        )}
         <ErrorNote message={error} />
+        {matches.length > 0 && (
+          <div className="deal" style={{ marginBottom: 8 }}>
+            {matches.map((r) => (
+              <button key={r.id} className="conv" style={{ padding: 8, border: 0 }} onClick={() => setText(r.body.replace('{{name}}', c.subscriber.name ?? ''))}>
+                <strong>/{r.shortcut}</strong>
+                <span className="muted conv-preview">{r.body}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'nowrap' }}>
           <textarea
             className="grow"
-            placeholder="Escribe un mensaje…  (Ctrl+Enter para enviar)"
+            placeholder="Escribe un mensaje… (/ para respuestas rápidas · Ctrl+Enter para enviar)"
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send()
             }}
           />
-          <button className="btn btn-primary" onClick={send} disabled={sending || !text.trim()}>
-            Enviar
+          <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
+            <button className="btn btn-primary" onClick={send} disabled={sending || !text.trim()}>
+              Enviar
+            </button>
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 6 }}>
+          <button className="btn btn-sm" onClick={() => ai('suggest')} disabled={busyAi}>
+            ✦ Sugerir respuesta
+          </button>
+          <button className="btn btn-sm" onClick={() => ai('rewrite')} disabled={busyAi || !text.trim()}>
+            ✦ Mejorar redacción
+          </button>
+          <button className="btn btn-sm" onClick={() => setMedia(true)}>
+            📎 Enviar archivo
           </button>
         </div>
       </div>
+      {media && (
+        <MediaModal
+          onClose={() => setMedia(false)}
+          onSend={async (m) => {
+            if (await post({ media: m })) setMedia(false)
+          }}
+        />
+      )}
     </div>
   )
 }
 
+function MediaModal({ onClose, onSend }: { onClose: () => void; onSend: (m: { kind: string; url: string; caption: string }) => void }) {
+  const [form, setForm] = useState({ kind: 'image', url: '', caption: '' })
+  return (
+    <Modal
+      title="Enviar archivo"
+      onClose={onClose}
+      footer={
+        <button className="btn btn-primary" disabled={!/^https:\/\//.test(form.url)} onClick={() => onSend(form)}>
+          Enviar
+        </button>
+      }
+    >
+      <div className="field">
+        <span>Tipo</span>
+        <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+          <option value="image">Imagen</option>
+          <option value="document">Documento (PDF…)</option>
+          <option value="video">Vídeo</option>
+          <option value="audio">Audio</option>
+        </select>
+      </div>
+      <div className="field">
+        <span>URL pública (https)</span>
+        <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://…" />
+        <small className="muted">WhatsApp descarga el archivo desde esta dirección.</small>
+      </div>
+      <div className="field">
+        <span>Texto (opcional)</span>
+        <input value={form.caption} onChange={(e) => setForm({ ...form, caption: e.target.value })} />
+      </div>
+    </Modal>
+  )
+}
+
 function Side({ id }: { id: string }) {
-  const conv = useAsync(() => api<Conversation>(`/api/conversations/${id}`), [id])
+  const conv = useAsync(() => api<ConvDetail>(`/api/conversations/${id}`), [id])
   const [note, setNote] = useState('')
+  const [iq, setIq] = useState<Insights | null>(null)
+  const [iqError, setIqError] = useState('')
+  const [iqBusy, setIqBusy] = useState(false)
   const c = conv.data
 
   async function addNote() {
@@ -193,8 +360,22 @@ function Side({ id }: { id: string }) {
     conv.reload()
   }
 
+  async function analyze() {
+    if (!c) return
+    setIqBusy(true)
+    setIqError('')
+    try {
+      setIq(await api<Insights>(`/api/subscribers/${c.subscriber.phone}/insights`))
+    } catch (e) {
+      setIqError((e as Error).message.includes('AI_API_KEY') ? 'Activa la IA (AI_API_KEY) para usar Subscriber IQ.' : (e as Error).message)
+    } finally {
+      setIqBusy(false)
+    }
+  }
+
   if (!c) return <div className="inbox-side" />
-  const sub = c.subscriber as typeof c.subscriber & { labels: { label: { id: string; name: string } }[] }
+  const sub = c.subscriber as typeof c.subscriber & { customFields?: Record<string, unknown> }
+  const fields = Object.entries(sub.customFields ?? {})
   return (
     <div className="inbox-side">
       <h3>Contacto</h3>
@@ -209,13 +390,47 @@ function Side({ id }: { id: string }) {
           </>
         )}
       </p>
-      <div className="chips" style={{ marginBottom: 16 }}>
+      <div className="chips" style={{ marginBottom: 12 }}>
         {sub.labels.map((l) => (
           <Badge key={l.label.id} tone="green">
             {l.label.name}
           </Badge>
         ))}
       </div>
+      {fields.length > 0 && (
+        <>
+          <h3 style={{ marginBottom: 6 }}>Campos</h3>
+          <table style={{ marginBottom: 12 }}>
+            <tbody>
+              {fields.map(([k, v]) => (
+                <tr key={k}>
+                  <td className="muted">{k}</td>
+                  <td>{String(v)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <h3 style={{ marginBottom: 6 }}>Subscriber IQ</h3>
+      <ErrorNote message={iqError} />
+      {iq ? (
+        <div className="deal">
+          <p style={{ margin: '0 0 8px' }}>{iq.summary}</p>
+          <div className="row" style={{ marginBottom: 6 }}>
+            <Badge tone={iq.leadScore >= 70 ? 'green' : iq.leadScore >= 40 ? 'amber' : 'gray'}>Lead {iq.leadScore}/100</Badge>
+            <Badge tone={iq.churnRisk >= 60 ? 'red' : 'gray'}>Abandono {iq.churnRisk}%</Badge>
+            <Badge tone={iq.sentiment === 'positive' ? 'green' : iq.sentiment === 'negative' ? 'red' : 'gray'}>{iq.sentiment === 'positive' ? 'Positivo' : iq.sentiment === 'negative' ? 'Negativo' : 'Neutral'}</Badge>
+          </div>
+          <strong>Siguiente acción</strong>
+          <div>{iq.nextBestAction}</div>
+        </div>
+      ) : null}
+      <button className="btn btn-sm" style={{ margin: '4px 0 16px' }} onClick={analyze} disabled={iqBusy}>
+        {iqBusy ? 'Analizando…' : iq ? 'Actualizar análisis' : '✦ Analizar con IA'}
+      </button>
+
       <h3 style={{ marginBottom: 8 }}>Notas internas</h3>
       <textarea placeholder="Añadir nota…" value={note} onChange={(e) => setNote(e.target.value)} style={{ minHeight: 60 }} />
       <button className="btn btn-sm" style={{ margin: '8px 0 12px' }} onClick={addNote} disabled={!note.trim()}>

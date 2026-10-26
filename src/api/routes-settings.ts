@@ -28,7 +28,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   // ---------- Consola de pruebas: simula un mensaje de cliente (solo clave de administrador) ----------
   app.post('/api/simulate/inbound', async (request, reply) => {
     const b = request.body as { phone?: string; name?: string; body?: string; interactiveId?: string };
-    const phone = String(b.phone ?? '').replace(/[^d]/g, '');
+    const phone = String(b.phone ?? '').replace(/\D/g, '');
     if (phone.length < 7 || !b.body) return reply.code(400).send({ error: 'phone and body are required' });
     const result = await handleInbound({ phone, name: b.name, body: b.body, interactiveId: b.interactiveId, messageType: b.interactiveId ? 'interactive' : 'text', providerMessageId: `sim.${Date.now()}.${Math.random().toString(36).slice(2, 8)}` });
     return { ok: true, handledBy: (result as any).handledBy ?? null, conversationId: result.conversationId };

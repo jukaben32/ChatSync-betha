@@ -60,6 +60,7 @@ export interface Subscriber {
   blocked: boolean
   optedOut: boolean
   source: string | null
+  customFields?: Record<string, unknown>
   createdAt: string
   labels: { label: Label }[]
   _count?: { conversations: number }
@@ -71,12 +72,15 @@ export interface Message {
   body: string
   status: string
   createdAt: string
+  metadata?: { sender?: string; type?: string; error?: string }
 }
 
 export interface Conversation {
   id: string
-  status: 'open' | 'pending' | 'solved'
+  status: 'open' | 'pending' | 'solved' | 'archived'
   assignedTo: string | null
+  followUpAt?: string | null
+  windowOpen?: boolean
   updatedAt: string
   subscriber: Subscriber
   messages: Message[]
@@ -96,6 +100,8 @@ export interface Sequence {
   name: string
   kind: 'sequence' | 'flow'
   triggerKeyword: string | null
+  triggerLabel?: string | null
+  stopOnReply?: boolean
   active: boolean
   steps: Step[]
   _count?: { enrollments: number }
@@ -111,7 +117,10 @@ export interface Broadcast {
   deliveredCount: number
   readCount: number
   failedCount: number
-  audience: { all?: boolean; labels?: string[] }
+  audience: { all?: boolean; labels?: string[]; excludeLabels?: string[]; fields?: { field: string; op: string; value?: string }[] }
+  scheduledAt?: string | null
+  mediaUrl?: string | null
+  buttons?: { title: string }[]
   createdAt: string
 }
 
