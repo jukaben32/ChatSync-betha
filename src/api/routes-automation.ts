@@ -1,7 +1,8 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
 import { whatsappConfigured } from '../config.js';
-import { sendBroadcast } from '../domain/broadcasts.js';
+import { resolveAudience, sendBroadcast } from '../domain/broadcasts.js';
+import type { Audience } from '../domain/broadcasts.js';
 import { enrollSubscriberInSequence, triggerBotFlowForSubscriber, triggerSequenceForSubscriber } from '../domain/sequences.js';
 import { createMetaTemplate, listMetaTemplates } from '../whatsapp/client.js';
 
@@ -15,20 +16,40 @@ export async function automationRoutes(app: FastifyInstance) {
   app.get('/api/broadcasts', async () => prisma.broadcast.findMany({ orderBy: { createdAt: 'desc' } }));
 
   app.post('/api/broadcasts', async (request, reply) => {
-    const body = request.body as { name?: string; audience?: any; contentType?: string; content?: string; language?: string };
+    const body = request.body as {
+      name?: string;
+      audience?: Audience;
+      contentType?: string;
+      content?: string;
+      language?: string;
+      mediaUrl?: string;
+      buttons?: Array<{ title: string }>;
+      scheduledAt?: string;
+    };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
     if (!body.content) return reply.code(400).send({ error: 'content is required' });
+    const when = body.scheduledAt ? new Date(body.scheduledAt) : null;
+    if (when && (Number.isNaN(when.getTime()) || when.getTime() < Date.now() - 60_000)) return reply.code(400).send({ error: 'scheduledAt must be a future date' });
     const broadcast = await prisma.broadcast.create({
       data: {
         name: body.name,
-        audience: body.audience ?? { all: true },
+        audience: (body.audience ?? { all: true }) as any,
         contentType: body.contentType === 'template' ? 'template' : 'text',
         content: body.content,
         language: body.language ?? 'es',
-        status: 'draft',
+        mediaUrl: body.mediaUrl || null,
+        buttons: (body.buttons ?? []).slice(0, 3) as any,
+        scheduledAt: when,
+        status: when ? 'scheduled' : 'draft',
       },
     });
     return reply.code(201).send(broadcast);
+  });
+
+  // Cuántos contactos recibirían una audiencia (para el editor)
+  app.post('/api/broadcasts/audience-count', async (request) => {
+    const audience = (request.body ?? {}) as Audience;
+    return { count: (await resolveAudience(audience)).length };
   });
 
   app.get('/api/broadcasts/:id', async (request, reply) => {
@@ -59,7 +80,7 @@ export async function automationRoutes(app: FastifyInstance) {
   app.get('/api/sequences', async (request) => {
     const q = request.query as { kind?: string };
     return prisma.sequence.findMany({
-      where: q.kind ? { kind: q.kind } : {},
+      where: q.kind ? { kind: q.kind } : { kind: { not: 'internal' } },
       include: { steps: { orderBy: { order: 'asc' } }, _count: { select: { enrollments: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -73,13 +94,15 @@ export async function automationRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/sequences', async (request, reply) => {
-    const body = request.body as { name?: string; kind?: string; triggerKeyword?: string; steps?: StepInput[] };
+    const body = request.body as { name?: string; kind?: string; triggerKeyword?: string; triggerLabel?: string; stopOnReply?: boolean; steps?: StepInput[] };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
     const sequence = await prisma.sequence.create({
       data: {
         name: body.name,
         kind: body.kind === 'flow' ? 'flow' : 'sequence',
         triggerKeyword: body.triggerKeyword || null,
+        triggerLabel: body.triggerLabel || null,
+        stopOnReply: body.stopOnReply ?? true,
         steps: { create: stepData(body.steps ?? []) },
       },
       include: { steps: true },
@@ -89,7 +112,7 @@ export async function automationRoutes(app: FastifyInstance) {
 
   app.patch('/api/sequences/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { name?: string; active?: boolean; triggerKeyword?: string | null; steps?: StepInput[] };
+    const body = request.body as { name?: string; active?: boolean; triggerKeyword?: string | null; triggerLabel?: string | null; stopOnReply?: boolean; steps?: StepInput[] };
     const exists = await prisma.sequence.findUnique({ where: { id } });
     if (!exists) return reply.code(404).send({ error: 'sequence_not_found' });
     if (body.steps) await prisma.sequenceStep.deleteMany({ where: { sequenceId: id } });
@@ -98,6 +121,8 @@ export async function automationRoutes(app: FastifyInstance) {
       data: {
         name: body.name,
         active: body.active,
+        stopOnReply: body.stopOnReply,
+        ...(body.triggerLabel !== undefined ? { triggerLabel: body.triggerLabel || null } : {}),
         ...(body.triggerKeyword !== undefined ? { triggerKeyword: body.triggerKeyword || null } : {}),
         ...(body.steps ? { steps: { create: stepData(body.steps) } } : {}),
       },
@@ -109,6 +134,15 @@ export async function automationRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     await prisma.sequence.delete({ where: { id } });
     return { ok: true };
+  });
+
+  // Estado de las inscripciones de una secuencia
+  app.get('/api/sequences/:id/stats', async (request) => {
+    const { id } = request.params as { id: string };
+    const grouped = await prisma.subscriberSequence.groupBy({ by: ['status'], where: { sequenceId: id }, _count: true });
+    const pending = await prisma.scheduledJob.count({ where: { sequenceId: id, status: 'pending' } });
+    const count = (s: string) => grouped.find((g) => g.status === s)?._count ?? 0;
+    return { active: count('active'), completed: count('completed'), stopped: count('stopped'), pendingSteps: pending };
   });
 
   app.post('/api/sequences/:id/trigger', async (request, reply) => {

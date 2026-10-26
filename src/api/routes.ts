@@ -3,9 +3,13 @@ import { prisma } from '../prisma.js';
 import { config, whatsappConfigured } from '../config.js';
 import { agentReady } from '../ai/agent.js';
 import { handleOutbound } from '../domain/inbound.js';
+import { sendMessage, withinServiceWindow } from '../domain/messaging.js';
+import { addLabelWithTriggers } from '../domain/labels.js';
 import { emitEvent } from '../domain/events.js';
 import { automationRoutes } from './routes-automation.js';
 import { settingsRoutes } from './routes-settings.js';
+import { hookRoutes } from './routes-hooks.js';
+import { aiRoutes } from './routes-ai.js';
 
 const subscriberInclude = { labels: { include: { label: true } }, _count: { select: { conversations: true } } } as const;
 
@@ -121,6 +125,33 @@ export async function apiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.get('/api/subscribers/:phone/notes', async (request, reply) => {
+    const { phone } = request.params as { phone: string };
+    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
+    return prisma.subscriberNote.findMany({ where: { subscriberId: subscriber.id }, orderBy: { createdAt: 'desc' }, take: 100 });
+  });
+
+  // Resumen CRM del contacto: etapa, valor y responsable de su oportunidad más reciente
+  app.get('/api/subscribers/:phone/crm', async (request, reply) => {
+    const { phone } = request.params as { phone: string };
+    const deal = await prisma.crmDeal.findFirst({ where: { subscriber: { phone } }, orderBy: { updatedAt: 'desc' } });
+    if (!deal) return reply.code(404).send({ error: 'deal_not_found' });
+    return deal;
+  });
+
+  app.put('/api/subscribers/:phone/crm', async (request, reply) => {
+    const { phone } = request.params as { phone: string };
+    const body = request.body as { stage?: string; value?: number; owner?: string };
+    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
+    const existing = await prisma.crmDeal.findFirst({ where: { subscriberId: subscriber.id }, orderBy: { updatedAt: 'desc' } });
+    const data = { stage: body.stage, owner: body.owner, ...(body.value !== undefined ? { value: Math.round(body.value) } : {}) };
+    return existing
+      ? prisma.crmDeal.update({ where: { id: existing.id }, data })
+      : prisma.crmDeal.create({ data: { subscriberId: subscriber.id, stage: body.stage ?? 'new', value: Math.round(body.value ?? 0), owner: body.owner } });
+  });
+
   // ---------- Labels ----------
   app.get('/api/labels', async () => prisma.label.findMany({ include: { _count: { select: { subscribers: true } } }, orderBy: { name: 'asc' } }));
 
@@ -144,13 +175,8 @@ export async function apiRoutes(app: FastifyInstance) {
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     const created = [];
     for (const name of body.labels ?? []) {
-      const label = await prisma.label.upsert({ where: { name }, update: {}, create: { name } });
-      await prisma.subscriberLabel.upsert({
-        where: { subscriberId_labelId: { subscriberId: subscriber.id, labelId: label.id } },
-        update: {},
-        create: { subscriberId: subscriber.id, labelId: label.id },
-      });
-      created.push(label);
+      await addLabelWithTriggers(subscriber.id, name);
+      created.push({ name });
     }
     return { ok: true, labels: created };
   });
@@ -165,10 +191,11 @@ export async function apiRoutes(app: FastifyInstance) {
 
   // ---------- Conversations (shared inbox) ----------
   app.get('/api/conversations', async (request) => {
-    const q = request.query as { phone?: string; status?: string; assignedTo?: string; q?: string };
+    const q = request.query as { phone?: string; status?: string; assignedTo?: string; q?: string; followUp?: string };
     const where: any = {};
     if (q.phone) where.subscriber = { phone: q.phone };
     if (q.status) where.status = q.status;
+    if (q.followUp === 'due') where.followUpAt = { lte: new Date() };
     if (q.assignedTo === 'unassigned') where.assignedTo = null;
     else if (q.assignedTo) where.assignedTo = q.assignedTo;
     if (q.q) where.subscriber = { OR: [{ phone: { contains: q.q } }, { name: { contains: q.q, mode: 'insensitive' } }] };
@@ -191,15 +218,29 @@ export async function apiRoutes(app: FastifyInstance) {
       },
     });
     if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
-    return conversation;
+    return { ...conversation, windowOpen: await withinServiceWindow(conversation.subscriberId) };
   });
 
   app.post('/api/conversations/:id/messages', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { body?: string };
-    if (!body.body?.trim()) return reply.code(400).send({ error: 'body is required' });
+    const body = request.body as {
+      body?: string;
+      sender?: string;
+      media?: { kind: 'image' | 'document' | 'audio' | 'video'; url: string; caption?: string; filename?: string };
+      buttons?: { body: string; buttons: Array<{ title: string }> };
+    };
     try {
-      const result = await handleOutbound({ conversationId: id, body: body.body.trim() });
+      if (body.media?.url || body.buttons?.buttons?.length) {
+        const conversation = await prisma.conversation.findUnique({ where: { id }, include: { subscriber: true } });
+        if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
+        const content = body.media?.url
+          ? ({ type: 'media', ...body.media } as const)
+          : ({ type: 'buttons', body: body.buttons!.body, buttons: body.buttons!.buttons.map((b, i) => ({ id: `m${i}`, title: b.title })) } as const);
+        const result = await sendMessage({ phone: conversation.subscriber.phone, content, conversationId: id, sender: body.sender ?? 'agent' });
+        return reply.code(result.ok ? 200 : 502).send(result);
+      }
+      if (!body.body?.trim()) return reply.code(400).send({ error: 'body is required' });
+      const result = await handleOutbound({ conversationId: id, body: body.body.trim(), sender: body.sender });
       return reply.code(result.ok ? 200 : 502).send(result);
     } catch (error) {
       return reply.code(404).send({ error: (error as Error).message });
@@ -218,7 +259,7 @@ export async function apiRoutes(app: FastifyInstance) {
 
   app.patch('/api/conversations/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { status?: string; assignedTo?: string | null };
+    const body = request.body as { status?: string; assignedTo?: string | null; followUpAt?: string | null };
     const current = await prisma.conversation.findUnique({ where: { id } });
     if (!current) return reply.code(404).send({ error: 'conversation_not_found' });
     const conversation = await prisma.conversation.update({
@@ -226,6 +267,7 @@ export async function apiRoutes(app: FastifyInstance) {
       data: {
         ...(body.status ? { status: body.status } : {}),
         ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo || null } : {}),
+        ...(body.followUpAt !== undefined ? { followUpAt: body.followUpAt ? new Date(body.followUpAt) : null } : {}),
       },
       include: { subscriber: true },
     });
@@ -281,5 +323,7 @@ export async function apiRoutes(app: FastifyInstance) {
   });
 
   await app.register(automationRoutes);
+  await app.register(hookRoutes);
+  await app.register(aiRoutes);
   await app.register(settingsRoutes);
 }

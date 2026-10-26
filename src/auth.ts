@@ -3,8 +3,14 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { config } from './config.js';
 import { prisma } from './prisma.js';
 
-// Rutas públicas: health, webhook de Meta (se valida con verify token / firma) y cron (CRON_SECRET).
-const PUBLIC_PREFIXES = ['/api/health', '/api/whatsapp/webhook', '/api/cron/'];
+// Rutas públicas: health, webhook de Meta (verify token + firma), cron (CRON_SECRET) y receptores de Webhook Workflow (token en la URL).
+const PUBLIC_PREFIXES = ['/api/health', '/api/whatsapp/webhook', '/api/cron/', '/api/hooks/'];
+
+// Solo la clave de administrador (no las API keys) puede tocar estas rutas.
+const ADMIN_ONLY_PREFIXES = ['/api/api-keys', '/api/settings', '/api/api-logs', '/api/simulate'];
+
+export type Scope = 'read' | 'write' | 'send';
+export const SCOPES: Scope[] = ['read', 'write', 'send'];
 
 function safeEqual(a: string, b: string) {
   const ba = Buffer.from(a);
@@ -23,7 +29,20 @@ function extractKey(request: FastifyRequest): string {
   return typeof apiKey === 'string' ? apiKey.trim() : '';
 }
 
-/** Hook onRequest: exige ADMIN_API_KEY o una API key creada desde el panel en todo /api/*. */
+/** Qué permiso exige una petición: leer, escribir o enviar mensajes. */
+export function requiredScope(method: string, path: string): Scope {
+  if (method === 'GET' || method === 'HEAD') return 'read';
+  if (/\/messages$|\/broadcasts\/[^/]+\/send$|\/trigger$|\/enroll$/.test(path)) return 'send';
+  return 'write';
+}
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    apiKeyName?: string;
+  }
+}
+
+/** Hook onRequest: exige ADMIN_API_KEY o una API key activa (con alcance) en todo /api/*. */
 export async function authHook(request: FastifyRequest, reply: FastifyReply) {
   const path = request.url.split('?')[0];
   if (request.method === 'OPTIONS') return;
@@ -37,10 +56,25 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply) {
   if (!key) return reply.code(401).send({ error: 'unauthorized' });
   if (safeEqual(key, config.adminApiKey)) return;
 
+  if (ADMIN_ONLY_PREFIXES.some((p) => path.startsWith(p))) return reply.code(403).send({ error: 'admin_key_required' });
+
   const record = await prisma.apiKey.findUnique({ where: { hash: sha256(key) } });
-  if (record) {
-    await prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } });
-    return;
+  if (!record || !record.active) return reply.code(401).send({ error: 'unauthorized' });
+  if (record.scopes.length && !record.scopes.includes(requiredScope(request.method, path))) {
+    return reply.code(403).send({ error: 'insufficient_scope', required: requiredScope(request.method, path) });
   }
-  return reply.code(401).send({ error: 'unauthorized' });
+  request.apiKeyName = record.name;
+  await prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } });
+}
+
+/** Hook onResponse: registro de uso de las API keys (no de la clave de administrador, para no inundar el log con el panel). */
+export async function usageLogHook(request: FastifyRequest, reply: FastifyReply) {
+  if (!request.apiKeyName) return;
+  try {
+    await prisma.apiLog.create({
+      data: { keyName: request.apiKeyName.slice(0, 64), method: request.method, path: request.url.split('?')[0].slice(0, 255), status: reply.statusCode },
+    });
+  } catch {
+    /* el log nunca debe romper la petición */
+  }
 }

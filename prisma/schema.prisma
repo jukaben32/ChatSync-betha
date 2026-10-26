@@ -22,6 +22,7 @@ model Subscriber {
   deals          CrmDeal[]
   broadcastRecipients BroadcastRecipient[]
   jobs           ScheduledJob[]
+  flowSessions   FlowSession[]
   blocked        Boolean  @default(false)
   optedOut       Boolean  @default(false)
   source         String?  @db.VarChar(64)
@@ -55,6 +56,7 @@ model Conversation {
   subscriber    Subscriber    @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
   status        String        @default("open") @db.VarChar(32)
   assignedTo    String?       @db.VarChar(64)
+  followUpAt    DateTime?     @db.Timestamptz
   channel       String        @default("whatsapp") @db.VarChar(32)
   messages      Message[]
   notes         SubscriberNote[]
@@ -98,6 +100,9 @@ model Sequence {
   triggerKeyword String?          @db.VarChar(128)
   active      Boolean             @default(true)
   jobs        ScheduledJob[]
+  flowSessions FlowSession[]
+  stopOnReply Boolean            @default(true)
+  triggerLabel String?           @db.VarChar(128)
   steps      SequenceStep[]
   enrollments SubscriberSequence[]
   createdAt   DateTime            @default(now()) @db.Timestamptz
@@ -119,6 +124,7 @@ model SubscriberSequence {
   sequenceId   String   @db.Uuid
   sequence     Sequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
   enrolledAt   DateTime @default(now()) @db.Timestamptz
+  status       String   @default("active") @db.VarChar(16) // active | stopped | completed
   @@id([subscriberId, sequenceId])
 }
 
@@ -136,6 +142,8 @@ model Broadcast {
   language    String        @default("es") @db.VarChar(16)
   scheduledAt DateTime?     @db.Timestamptz
   recipients  BroadcastRecipient[]
+  mediaUrl    String?       @db.VarChar(1024)
+  buttons     Json          @default("[]")
   createdAt   DateTime      @default(now()) @db.Timestamptz
   updatedAt   DateTime      @updatedAt @db.Timestamptz
 }
@@ -226,6 +234,8 @@ model ApiKey {
   prefix     String    @db.VarChar(16)
   hash       String    @unique @db.VarChar(64)
   lastUsedAt DateTime? @db.Timestamptz
+  scopes     String[]
+  active     Boolean   @default(true)
   createdAt  DateTime  @default(now()) @db.Timestamptz
 }
 
@@ -241,4 +251,68 @@ model ScheduledJob {
   createdAt    DateTime   @default(now()) @db.Timestamptz
 
   @@index([status, runAt])
+}
+
+model CustomFieldDef {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String   @unique @db.VarChar(64)
+  label     String   @db.VarChar(255)
+  type      String   @default("text") @db.VarChar(16) // text | number | date | boolean
+  createdAt DateTime @default(now()) @db.Timestamptz
+}
+
+model Setting {
+  key       String   @id @db.VarChar(64)
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz
+}
+
+model CannedResponse {
+  id        String   @id @default(uuid()) @db.Uuid
+  shortcut  String   @unique @db.VarChar(64)
+  title     String   @db.VarChar(255)
+  body      String   @db.Text
+  createdAt DateTime @default(now()) @db.Timestamptz
+}
+
+model FlowSession {
+  id            String     @id @default(uuid()) @db.Uuid
+  subscriberId  String     @db.Uuid
+  subscriber    Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  sequenceId    String     @db.Uuid
+  sequence      Sequence   @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  awaitingOrder Int        // paso que está esperando la respuesta del cliente
+  status        String     @default("active") @db.VarChar(16) // active | done | expired
+  createdAt     DateTime   @default(now()) @db.Timestamptz
+  updatedAt     DateTime   @updatedAt @db.Timestamptz
+
+  @@index([subscriberId, status])
+}
+
+model InboundWorkflow {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(255)
+  token        String   @unique @db.VarChar(64)
+  phonePath    String   @default("phone") @db.VarChar(128)
+  templateName String?  @db.VarChar(255)
+  language     String   @default("es") @db.VarChar(16)
+  text         String?  @db.Text
+  variables    Json     @default("{}") // { "1": "customer.name" }
+  conditions   Json     @default("[]") // [{ path, op, value }]
+  delayMinutes Int      @default(0)
+  actions      Json     @default("{}") // { labels: [], sequenceId, assignTo }
+  active       Boolean  @default(true)
+  lastPayload  Json?
+  createdAt    DateTime @default(now()) @db.Timestamptz
+}
+
+model ApiLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  keyName   String?  @db.VarChar(64)
+  method    String   @db.VarChar(8)
+  path      String   @db.VarChar(255)
+  status    Int
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([createdAt])
 }

@@ -20,6 +20,8 @@ interface WaMessage {
   audio?: { id?: string };
   video?: { id?: string; caption?: string };
   location?: { latitude?: number; longitude?: number; name?: string };
+  /** Presente cuando el chat empieza desde un anuncio de Click-to-WhatsApp. */
+  referral?: { source_id?: string; source_type?: string; source_url?: string; headline?: string; ctwa_clid?: string };
 }
 
 interface WaStatus {
@@ -44,7 +46,7 @@ interface WaPayload {
 }
 
 function messageText(msg: WaMessage): string {
-  return (
+  const direct =
     msg.text?.body ??
     msg.button?.text ??
     msg.interactive?.button_reply?.title ??
@@ -52,10 +54,14 @@ function messageText(msg: WaMessage): string {
     msg.image?.caption ??
     msg.video?.caption ??
     msg.document?.caption ??
-    msg.document?.filename ??
-    (msg.location ? `📍 ${msg.location.name ?? ''} (${msg.location.latitude}, ${msg.location.longitude})`.trim() : '') ??
-    ''
-  );
+    msg.document?.filename;
+  if (direct) return direct;
+  if (msg.location) return `📍 ${msg.location.name ?? ''} (${msg.location.latitude}, ${msg.location.longitude})`.trim();
+  if (msg.image) return '[imagen]';
+  if (msg.audio) return '[audio]';
+  if (msg.video) return '[vídeo]';
+  if (msg.document) return '[documento]';
+  return '';
 }
 
 function validSignature(rawBody: Buffer | undefined, header: string | undefined) {
@@ -99,6 +105,8 @@ export async function whatsappRoutes(app: FastifyInstance) {
               body: messageText(msg),
               providerMessageId: msg.id,
               messageType: msg.type,
+              interactiveId: msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? msg.button?.payload,
+              source: msg.referral?.source_id ? `ctwa:${msg.referral.source_id}` : undefined,
             });
           } catch (error) {
             request.log.error({ err: error, from: msg.from }, 'whatsapp_inbound_failed');

@@ -14,23 +14,26 @@
     "build": "prisma generate && tsc -p tsconfig.json",
     "postinstall": "prisma generate",
     "build:web": "npm --prefix frontend ci && npm --prefix frontend run build",
-    "build:all": "npm run build && npm run build:web"
+    "build:all": "npm run build && npm run build:web",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
     "@fastify/static": "^8.0.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@prisma/client": "^6.16.0",
     "dotenv": "^16.4.5",
     "fastify": "^5.4.0",
     "prisma": "^6.16.0",
-    "@prisma/client": "^6.16.0",
-    "zod": "^3.23.8",
+    "tsx": "^4.20.0",
     "typescript": "^5.7.0",
-    "tsx": "^4.20.0"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "prisma": "^6.16.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
   }
 }

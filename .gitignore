@@ -10,3 +10,9 @@ coverage/
 
 # build del panel (frontend -> public)
 public/
+
+# capturas de REA (material de referencia local, no se sube)
+docs/rea-captures/*.json
+docs/rea-captures/pages/
+docs/rea-captures/condensed/
+!docs/rea-captures/public-scenario.json

@@ -4,7 +4,7 @@ import cors from '@fastify/cors';
 import { PrismaClient } from '@prisma/client';
 import { whatsappRoutes } from './whatsapp/webhook.js';
 import { apiRoutes } from './api/routes.js';
-import { authHook } from './auth.js';
+import { authHook, usageLogHook } from './auth.js';
 import { startMcpServer } from './mcp/server.js';
 
 export const prisma = new PrismaClient();
@@ -27,6 +27,7 @@ app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, bo
 
 app.register(cors, { origin: true });
 app.addHook('onRequest', authHook);
+app.addHook('onResponse', usageLogHook);
 app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 app.register(apiRoutes);
 

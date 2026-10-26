@@ -2,20 +2,17 @@ import { randomBytes } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
 import { config } from '../config.js';
-import { sha256 } from '../auth.js';
+import { SCOPES, sha256 } from '../auth.js';
 import { processDueJobs } from '../domain/sequences.js';
+import { processScheduledBroadcasts } from '../domain/broadcasts.js';
 import { emitEvent } from '../domain/events.js';
+import { DEFAULTS, getSetting, setSetting } from '../domain/settings.js';
+import type { SettingKey } from '../domain/settings.js';
+import { assertPublicUrl } from '../util/net.js';
+import { handleInbound } from '../domain/inbound.js';
 
+// Tres interruptores independientes en ChatSyncs (entrante, saliente, estado); aquí se eligen por evento.
 const EVENTS = ['message.received', 'message.sent', 'message.status', 'subscriber.created', 'conversation.updated', 'broadcast.sent'];
-
-function isPrivateHost(hostname: string) {
-  return (
-    hostname === 'localhost' ||
-    hostname.endsWith('.local') ||
-    /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.)/.test(hostname) ||
-    hostname === '::1'
-  );
-}
 
 function htmlToText(html: string) {
   return html
@@ -28,6 +25,40 @@ function htmlToText(html: string) {
 }
 
 export async function settingsRoutes(app: FastifyInstance) {
+  // ---------- Consola de pruebas: simula un mensaje de cliente (solo clave de administrador) ----------
+  app.post('/api/simulate/inbound', async (request, reply) => {
+    const b = request.body as { phone?: string; name?: string; body?: string; interactiveId?: string };
+    const phone = String(b.phone ?? '').replace(/[^d]/g, '');
+    if (phone.length < 7 || !b.body) return reply.code(400).send({ error: 'phone and body are required' });
+    const result = await handleInbound({ phone, name: b.name, body: b.body, interactiveId: b.interactiveId, messageType: b.interactiveId ? 'interactive' : 'text', providerMessageId: `sim.${Date.now()}.${Math.random().toString(36).slice(2, 8)}` });
+    return { ok: true, handledBy: (result as any).handledBy ?? null, conversationId: result.conversationId };
+  });
+
+  // ---------- Ajustes (horario comercial, IA, asignación) ----------
+  app.get('/api/settings', async () => ({
+    businessHours: await getSetting('businessHours'),
+    ai: await getSetting('ai'),
+    assignment: await getSetting('assignment'),
+    sandbox: await getSetting('sandbox'),
+  }));
+
+  app.put('/api/settings/:key', async (request, reply) => {
+    const { key } = request.params as { key: string };
+    if (!(key in DEFAULTS)) return reply.code(404).send({ error: 'unknown_setting' });
+    const body = request.body as Record<string, unknown>;
+    if (!body || typeof body !== 'object') return reply.code(400).send({ error: 'object body required' });
+    if (key === 'businessHours') {
+      const tz = String(body.timezone ?? '');
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: tz });
+      } catch {
+        return reply.code(400).send({ error: 'invalid_timezone' });
+      }
+    }
+    await setSetting(key as SettingKey, body);
+    return getSetting(key as SettingKey);
+  });
+
   // ---------- Equipo ----------
   app.get('/api/team', async () => prisma.teamMember.findMany({ orderBy: { createdAt: 'asc' } }));
   app.post('/api/team', async (request, reply) => {
@@ -42,26 +73,67 @@ export async function settingsRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ---------- Respuestas rápidas (canned responses) ----------
+  app.get('/api/canned-responses', async () => prisma.cannedResponse.findMany({ orderBy: { shortcut: 'asc' } }));
+  app.post('/api/canned-responses', async (request, reply) => {
+    const body = request.body as { shortcut?: string; title?: string; body?: string };
+    if (!body.shortcut || !body.body) return reply.code(400).send({ error: 'shortcut and body are required' });
+    const shortcut = body.shortcut.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 64);
+    if (!shortcut) return reply.code(400).send({ error: 'invalid_shortcut' });
+    const row = await prisma.cannedResponse.upsert({
+      where: { shortcut },
+      update: { title: body.title || shortcut, body: body.body },
+      create: { shortcut, title: body.title || shortcut, body: body.body },
+    });
+    return reply.code(201).send(row);
+  });
+  app.delete('/api/canned-responses/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    await prisma.cannedResponse.delete({ where: { id } });
+    return { ok: true };
+  });
+
+  // ---------- Campos personalizados ----------
+  app.get('/api/custom-fields', async () => prisma.customFieldDef.findMany({ orderBy: { key: 'asc' } }));
+  app.post('/api/custom-fields', async (request, reply) => {
+    const body = request.body as { key?: string; label?: string; type?: string };
+    const key = (body.key ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 64);
+    if (!key) return reply.code(400).send({ error: 'key is required' });
+    const type = ['text', 'number', 'date', 'boolean'].includes(body.type ?? '') ? body.type! : 'text';
+    const row = await prisma.customFieldDef.upsert({ where: { key }, update: { label: body.label || key, type }, create: { key, label: body.label || key, type } });
+    return reply.code(201).send(row);
+  });
+  app.delete('/api/custom-fields/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    await prisma.customFieldDef.delete({ where: { id } });
+    return { ok: true };
+  });
+
   // ---------- Base de conocimiento (AI Agent) ----------
   app.get('/api/knowledge', async () =>
     prisma.knowledgeSource.findMany({ select: { id: true, type: true, title: true, sourceUrl: true, createdAt: true }, orderBy: { createdAt: 'desc' } }),
   );
   app.post('/api/knowledge', async (request, reply) => {
-    const body = request.body as { type?: 'text' | 'url'; title?: string; content?: string; url?: string };
-    if (body.type === 'url') {
+    const body = request.body as { type?: 'text' | 'url' | 'sheet'; title?: string; content?: string; url?: string };
+    if (body.type === 'url' || body.type === 'sheet') {
       if (!body.url) return reply.code(400).send({ error: 'url is required' });
-      let parsed: URL;
+      let target: URL;
       try {
-        parsed = new URL(body.url);
-      } catch {
-        return reply.code(400).send({ error: 'invalid_url' });
+        target = assertPublicUrl(body.url);
+      } catch (e) {
+        return reply.code(400).send({ error: (e as Error).message });
       }
-      if (!['http:', 'https:'].includes(parsed.protocol) || isPrivateHost(parsed.hostname)) return reply.code(400).send({ error: 'url_not_allowed' });
-      const res = await fetch(parsed, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).catch(() => null);
+      // Google Sheets: se lee como CSV público (la hoja debe estar compartida con enlace)
+      const sheet = body.type === 'sheet' && target.hostname === 'docs.google.com' ? target.pathname.match(/\/spreadsheets\/d\/([^/]+)/) : null;
+      const fetchUrl = sheet ? `https://docs.google.com/spreadsheets/d/${sheet[1]}/export?format=csv` : target.toString();
+      const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).catch(() => null);
       if (!res?.ok) return reply.code(502).send({ error: 'fetch_failed' });
-      const text = htmlToText(await res.text()).slice(0, 20_000);
+      const raw = await res.text();
+      const text = (sheet ? raw : htmlToText(raw)).slice(0, 20_000);
       if (!text) return reply.code(422).send({ error: 'empty_page' });
-      const source = await prisma.knowledgeSource.create({ data: { type: 'url', title: body.title || parsed.hostname, sourceUrl: parsed.toString(), content: text } });
+      const source = await prisma.knowledgeSource.create({
+        data: { type: sheet ? 'sheet' : 'url', title: body.title || target.hostname, sourceUrl: target.toString(), content: text },
+      });
       return reply.code(201).send({ id: source.id, title: source.title, chars: text.length });
     }
     if (!body.title || !body.content) return reply.code(400).send({ error: 'title and content are required' });
@@ -95,32 +167,43 @@ export async function settingsRoutes(app: FastifyInstance) {
     return { ok: true };
   });
   app.post('/api/webhooks/test', async () => {
-    await emitEvent('message.received', { test: true, phone: '0000000000', body: 'ping desde ChatSyncs' });
+    await emitEvent('message.received', { test: true, name: 'Prueba', phone: '0000000000', message: 'ping desde ChatSyncs' });
     return { ok: true };
   });
 
-  // ---------- API keys ----------
+  // ---------- API keys (con alcance) y registro de uso ----------
   app.get('/api/api-keys', async () =>
-    prisma.apiKey.findMany({ select: { id: true, name: true, prefix: true, lastUsedAt: true, createdAt: true }, orderBy: { createdAt: 'desc' } }),
+    prisma.apiKey.findMany({ select: { id: true, name: true, prefix: true, scopes: true, active: true, lastUsedAt: true, createdAt: true }, orderBy: { createdAt: 'desc' } }),
   );
   app.post('/api/api-keys', async (request, reply) => {
-    const body = request.body as { name?: string };
-    const key = 'cs_' + randomBytes(24).toString('hex');
-    const record = await prisma.apiKey.create({ data: { name: body.name || 'API key', prefix: key.slice(0, 8), hash: sha256(key) } });
+    const body = request.body as { name?: string; scopes?: string[] };
+    const scopes = (body.scopes ?? []).filter((s) => (SCOPES as string[]).includes(s));
+    const key = 'cs_live_' + randomBytes(24).toString('hex');
+    const record = await prisma.apiKey.create({ data: { name: body.name || 'API key', prefix: key.slice(0, 12), hash: sha256(key), scopes } });
     // La clave completa solo se muestra aquí, una vez.
-    return reply.code(201).send({ id: record.id, name: record.name, key });
+    return reply.code(201).send({ id: record.id, name: record.name, scopes, key });
+  });
+  app.patch('/api/api-keys/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { active?: boolean; scopes?: string[]; name?: string };
+    return prisma.apiKey.update({
+      where: { id },
+      data: { active: body.active, name: body.name, ...(body.scopes ? { scopes: body.scopes.filter((s) => (SCOPES as string[]).includes(s)) } : {}) },
+      select: { id: true, name: true, prefix: true, scopes: true, active: true },
+    });
   });
   app.delete('/api/api-keys/:id', async (request) => {
     const { id } = request.params as { id: string };
     await prisma.apiKey.delete({ where: { id } });
     return { ok: true };
   });
+  app.get('/api/api-logs', async () => prisma.apiLog.findMany({ orderBy: { createdAt: 'desc' }, take: 100 }));
 
   // ---------- Analítica ----------
   app.get('/api/analytics/overview', async () => {
     const since = new Date(Date.now() - 7 * 86_400_000);
     since.setHours(0, 0, 0, 0);
-    const [subscribers, newSubscribers, open, pending, solved, messages, broadcasts, deals, labels] = await Promise.all([
+    const [subscribers, newSubscribers, open, pending, solved, messages, broadcasts, deals, labels, sources, followUps] = await Promise.all([
       prisma.subscriber.count(),
       prisma.subscriber.count({ where: { createdAt: { gte: since } } }),
       prisma.conversation.count({ where: { status: 'open' } }),
@@ -130,6 +213,8 @@ export async function settingsRoutes(app: FastifyInstance) {
       prisma.broadcast.aggregate({ _sum: { sentCount: true, deliveredCount: true, readCount: true, failedCount: true }, _count: true }),
       prisma.crmDeal.groupBy({ by: ['stage'], _count: true, _sum: { value: true } }),
       prisma.label.findMany({ include: { _count: { select: { subscribers: true } } }, orderBy: { name: 'asc' }, take: 10 }),
+      prisma.subscriber.groupBy({ by: ['source'], _count: true }),
+      prisma.conversation.count({ where: { followUpAt: { lte: new Date() }, status: { in: ['open', 'pending'] } } }),
     ]);
 
     const perDay = new Map<string, { date: string; inbound: number; outbound: number }>();
@@ -147,7 +232,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     return {
       subscribers,
       newSubscribers,
-      conversations: { open, pending, solved },
+      conversations: { open, pending, solved, followUpsDue: followUps },
       messagesPerDay: [...perDay.values()],
       broadcasts: {
         total: broadcasts._count,
@@ -160,13 +245,18 @@ export async function settingsRoutes(app: FastifyInstance) {
       },
       deals: deals.map((d) => ({ stage: d.stage, count: d._count, value: d._sum.value ?? 0 })),
       labels: labels.map((l) => ({ name: l.name, subscribers: l._count.subscribers })),
+      sources: sources.map((s) => ({ source: s.source ?? 'desconocido', subscribers: s._count })),
     };
   });
 
-  // ---------- Cron (Vercel Cron envía Authorization: Bearer $CRON_SECRET) ----------
+  // ---------- Cron (Vercel Cron o un disparador externo envían Authorization: Bearer $CRON_SECRET) ----------
   app.get('/api/cron/tick', async (request, reply) => {
     const auth = request.headers.authorization ?? '';
     if (!config.cronSecret || auth !== `Bearer ${config.cronSecret}`) return reply.code(401).send({ error: 'unauthorized' });
-    return { ok: true, ...(await processDueJobs()) };
+    const jobs = await processDueJobs();
+    const broadcasts = await processScheduledBroadcasts();
+    // Las sesiones de flujo caducan a las 24 h (fin de la ventana de servicio de WhatsApp)
+    const expired = await prisma.flowSession.updateMany({ where: { status: 'active', updatedAt: { lt: new Date(Date.now() - 86_400_000) } }, data: { status: 'expired' } });
+    return { ok: true, jobs, broadcasts, expiredSessions: expired.count };
   });
 }

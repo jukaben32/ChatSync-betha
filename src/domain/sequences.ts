@@ -8,7 +8,7 @@ export async function enrollSubscriberInSequence(params: { phone: string; sequen
   if (!sequence) throw new Error('sequence_not_found');
   return prisma.subscriberSequence.upsert({
     where: { subscriberId_sequenceId: { subscriberId: subscriber.id, sequenceId: sequence.id } },
-    update: {},
+    update: { status: 'active' },
     create: { subscriberId: subscriber.id, sequenceId: sequence.id },
   });
 }
@@ -45,7 +45,11 @@ export async function processDueJobs(limit = 50) {
         phone: job.subscriber.phone,
         flow: { id: job.sequence.id, name: job.sequence.name, steps: job.sequence.steps as any },
         startOrder: job.resumeOrder,
+        resuming: true,
       });
+      const pending = await prisma.scheduledJob.count({ where: { subscriberId: job.subscriberId, sequenceId: job.sequenceId, status: 'pending' } });
+      if (!pending) await prisma.subscriberSequence.updateMany({ where: { subscriberId: job.subscriberId, sequenceId: job.sequenceId, status: 'active' }, data: { status: 'completed' } });
+      if (job.sequence.kind === 'internal') await prisma.sequence.delete({ where: { id: job.sequence.id } }).catch(() => undefined);
       done += 1;
     } catch {
       await prisma.scheduledJob.update({ where: { id: job.id }, data: { status: 'failed' } });
