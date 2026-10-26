@@ -4,6 +4,11 @@ import { sendBroadcast } from '../domain/broadcasts.js';
 import { triggerBotFlowForSubscriber } from '../domain/sequences.js';
 
 export async function apiRoutes(app: FastifyInstance) {
+  app.get('/', async () => ({
+    ok: true,
+    service: 'chatsyncs-replica',
+    endpoints: ['/api/health', '/api/account', '/api/subscribers', '/api/labels', '/api/sequences', '/api/whatsapp/webhook'],
+  }));
   app.get('/api/health', async () => ({ ok: true, service: 'chatsyncs-replica' }));
 
   // ---------- Subscribers ----------
