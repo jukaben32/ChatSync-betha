@@ -1,128 +1,166 @@
 # Análisis de carencias: réplica vs. ChatSyncs
 
-**Método.** Capturas con REA (`capture-browser-scenario`, Chromium headless) de 33 páginas públicas de chatsyncs.com:
-home, pricing, mcp, changelog, services, compare, `/ai-agents/*`, `/features/*` (todas), industrias y blog.
-El texto se extrajo del árbol de accesibilidad. El escenario reproducible está en `docs/rea-captures/public-scenario.json`;
-las capturas en bruto no se versionan (pesan ~1,7 MB y son contenido de terceros).
+**Método.** Dos capturas con REA (`capture-browser-scenario`, `inspect-web-page`):
 
-**No cubierto:** la app con sesión (`platform.chatsyncs.com`). La ventana de login se abrió pero la sesión no llegó a
-capturarse, así que **no hay evidencia de las pantallas internas** ni del contenido de la consola de desarrolladores.
-Todo lo de la columna «Evidencia» sale de páginas públicas (marketing, changelog y documentación de producto).
+1. **Web pública** de chatsyncs.com: 33 páginas (home, pricing, mcp, changelog, services, compare, `/ai-agents/*`, `/features/*`,
+   industrias y blog). Escenario reproducible en `docs/rea-captures/public-scenario.json`.
+2. **App con sesión** (`platform.chatsyncs.com`, cuenta de prueba en periodo de prueba): panel, Shared Inbox, Connect Account,
+   Chatbot Manager, Subscriber Manager, Broadcast Center, Ajustes (seguridad), Cuenta, Equipo y la **consola de desarrolladores**,
+   que documenta 42 endpoints de la API v1 (ver [CHATSYNCS_API_V1.md](CHATSYNCS_API_V1.md)).
 
-**Fuera de alcance por decisión del usuario (uso privado, sin cobros):** WhatsApp Payments, Razorpay/Paytm, planes y
-facturación, pedidos y catálogo con precios/cupones, depósitos en citas, revendedores.
+Limitación: la cuenta de prueba estaba vacía (0 suscriptores, sin bots), así que las pantallas de detalle (editor de flujos
+con datos, ficha de un suscriptor con historial, informes con cifras) se vieron sin contenido. Las capturas en bruto contienen
+datos personales de la cuenta y **se eliminaron**; solo se conserva lo derivado aquí.
+
+**Fuera de alcance por decisión del usuario (uso privado, sin cobros):** WhatsApp Payments, Razorpay/Paytm, planes, facturación,
+transacciones, pedidos y catálogo con precios/cupones/envío, depósitos en citas, revendedores. En la app real: *Billing*,
+*Transactions*, *Package List*, *Commerce* y los endpoints `catalog/*`.
 
 Leyenda: ✅ hecho · ⚠️ parcial · ❌ pendiente · ⛔ excluido
 
+## Menú real de ChatSyncs y equivalencia
+
+| Sección de ChatSyncs | En la réplica |
+|---|---|
+| Dashboard (crecimiento 30 días, estado de la IA, accesos rápidos) | ✅ Panel |
+| Shared Inbox (Mine/All/Important/Unread/Archived/Blocked/Resolved, Reply/Note, canned con `/`) | ✅ Bandeja |
+| Connect Account (WhatsApp, Shopify, WooCommerce, Salla) | ⚠️ solo WhatsApp (ajustes + webhook); tiendas ⛔ |
+| Chatbot Manager → Automation (Keyword Replies con carpetas, Follow-up Sequences) | ✅ Respuestas por palabra clave, Secuencias y flujos |
+| Chatbot Manager → Data Collection | ✅ Formularios |
+| Chatbot Manager → AI (Configuration, Agents) | ⚠️ un agente global (no varios) |
+| Chatbot Manager → Quick Actions / Outbound Actions | ❌ |
+| Subscriber Manager (filtros, listas, secuencias, import/export, bulk, perfil con pestañas) | ✅ Contactos |
+| Broadcast Center (Broadcast/Sequence, WhatsApp/SMS, métricas 30 días) | ⚠️ sin SMS |
+| Control Panel → Settings & Integration (Seguridad, API) | ✅ Ajustes, Webhooks y API |
+| Control Panel → User Manager / User Permission | ✅ Equipo (roles admin/agente) |
+| Developer (API v1, consola, uso) | ✅ `/api/v1` compatible + registro de uso |
+| Learn / Documentation / Support Ticket / Chatty AI | ⛔ servicio de la empresa |
+
 ## Mensajería
 
-| Función | Evidencia (chatsyncs.com) | Estado | Notas |
+| Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| Texto, plantilla, botones, archivos | `/mcp` (send_*), `/features/whatsapp-broadcast`, changelog may-2026 | ✅ | `src/whatsapp/rich.ts`; listas además de botones |
-| Regla de 24 h | blog `whatsapp-24-hour-rule`, `/mcp` | ✅ | texto libre solo dentro de la ventana; plantillas siempre |
-| Plantillas: crear, estado, sincronizar | changelog 7-oct (API create/check template) | ✅ | requiere credenciales de Meta |
-| Variables en mensajes (`{{name}}`, campos) | changelog 24-may («#» en campos), broadcast | ✅ | sintaxis `{{campo}}` |
-| Mensaje de audio / voz con formato propio | changelog ene/abr-2026 | ❌ | solo envío de audio por URL |
-| Coexistencia con la app de WhatsApp Business | `/features/whatsapp-coexistence` | ⚠️ | es un alta en Meta, no código; el webhook ya recibe los eventos |
+| Texto, plantilla, botones (con cabecera de texto o medio), listas, archivos | `/mcp`, consola API, changelog | ✅ | `src/whatsapp/rich.ts` |
+| Regla de 24 h | blog, `/mcp` | ✅ | texto libre solo en ventana; plantillas siempre |
+| Plantillas: crear, estado, sincronizar | changelog 7-oct, consola | ✅ | requiere credenciales de Meta |
+| Variables `{{name}}`, `{{campo}}` | changelog 24-may | ✅ | |
+| Subir medios y usar `media_id` | consola `upload/media` | ❌ | se envía por URL pública https |
+| Audio con formato de nota de voz | changelog ene-2026 | ❌ | |
+| Coexistencia con la app de WhatsApp Business | `/features/whatsapp-coexistence` | ⚠️ | alta en Meta, no código |
 
 ## Bandeja compartida
 
 | Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| Asignación manual y por reparto equitativo | `/features/shared-inbox` | ✅ | round-robin por menos chats abiertos |
-| Notas internas, etiquetas, historial | idem | ✅ | |
-| Estados resolver / archivar / bloquear | changelog 5-mar-2026 | ✅ | |
-| Respuestas rápidas (canned) | changelog nov-2025 / abr-2026 | ✅ | `/atajo` en el composer |
-| Seguimiento (follow-up) | changelog 16-ago-2026 | ✅ | recordatorio por conversación + pestaña «Seguimiento» |
-| Botón «AI Reply» / reescribir | `/features/ai-agent`, changelog nov-2025 | ✅ | sugerir respuesta y mejorar redacción |
-| Subscriber IQ (lead score, abandono, sentimiento) | `/features/ai-agent` | ✅ | bajo demanda, requiere `AI_API_KEY` |
-| Enmascarar teléfonos a los agentes | `/features/shared-inbox` | ❌ | requiere login por agente |
-| Login propio por agente | `/features/shared-inbox` | ❌ | hoy hay una sola clave de administrador |
-| Tiempo real | changelog dic-2025 (eventos de lectura) | ⚠️ | polling cada 8-12 s (sin websockets en serverless) |
+| Pestañas Mías / Sin asignar / No leídas / Importantes / Seguimiento / Resueltas / Archivadas / Bloqueados | app: Shared Inbox | ✅ | |
+| Responder / Nota interna, `/` para respuestas rápidas | app | ✅ | |
+| Asignación manual y reparto equitativo | `/features/shared-inbox` | ✅ | |
+| Sugerir respuesta, mejorar redacción, traducir, Subscriber IQ | `/features/ai-agent`, cuenta | ✅ | requiere `AI_API_KEY` |
+| Firma del agente | app: Cuenta | ✅ | |
+| Login por agente, mensajes firmados con su nombre | `/features/shared-inbox` | ✅ | roles admin/agente; sesiones de 12 h |
+| Enmascarar teléfonos a los agentes | `/features/shared-inbox` | ✅ | en el servidor; el agente opera por id de contacto |
+| Datos del cliente (país, zona horaria, idioma) | app: panel lateral | ❌ | WhatsApp no los envía; habría que inferirlos del prefijo |
+| Tiempo real | changelog dic-2025 | ⚠️ | consulta cada 8-12 s (sin websockets en serverless) |
 
 ## Automatización
 
 | Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| Flow builder: preguntas, botones, ramas, condiciones | `/features/whatsapp-chatbot`, changelog 24-may-2026 | ✅ | editor por pasos con destino por opción (no es canvas de arrastrar) |
-| Pedir un dato y guardarlo en un campo («user input») | changelog 24-sep-2025 | ✅ | con validación número/email/teléfono |
-| Condición con varias reglas (If/Else) | changelog 24-may-2026 | ✅ | todas / alguna |
-| Llamada HTTP desde el flujo | chatbot, changelog 7-jul-2026 | ✅ | bloquea destinos internos |
-| Retrasos | changelog nov-2025 (smart delay hasta 24 h) | ⚠️ | funciona; precisión = frecuencia del cron (5 min con GitHub Actions, diaria solo con Vercel) |
-| Traspaso a humano con contexto | chatbot | ✅ | |
-| Secuencias drip, auto-stop al responder | `/features/drip-campaigns` | ✅ | |
-| Inscripción por etiqueta | drip-campaigns | ✅ | |
-| Estadísticas por paso (abiertos/clics) | drip-campaigns | ⚠️ | solo inscritos activos/completados/detenidos |
-| Horario comercial por día + respuesta fuera de horario | changelog 25-feb / 9-abr-2026 | ✅ | |
-| Webhook Workflow entrante (URL, mapeo, condiciones, retraso, acciones) | `/features/webhook-workflow` | ✅ | |
-| Plantillas de flujo reutilizables / asistente IA para armar flujos | changelog 7-jul-2026 | ❌ | |
-| WhatsApp Forms / WhatsApp Flows (formularios nativos) | `/features/whatsapp-forms`, changelog may-2026 | ❌ | alternativa actual: preguntas en el flow builder |
-| Reserva de citas con disponibilidad | `/features/appointment-booking` | ❌ | alternativa: flujo + HTTP a Cal.com/Calendly |
-| Click-to-WhatsApp: origen del lead | `/features/click-to-whatsapp-ads` | ⚠️ | guarda `ctwa:<id>` como origen y lo muestra; sin informe de costes |
-| Integración con Google Sheets (envío de datos) | changelog ene/sep-2026 | ❌ | solo lectura de hojas como conocimiento de la IA |
+| Flow builder: preguntas, botones, listas, ramas, condiciones múltiples, HTTP, esperas | `/features/whatsapp-chatbot`, changelog | ✅ | editor por pasos con destino por opción (no es canvas de arrastrar) |
+| Respuestas por palabra clave (carpetas, coincidencia exacta/contiene/empieza) | app: Keyword Replies | ✅ | |
+| Pedir un dato y guardarlo en un campo; validar número/email/teléfono/fecha | changelog 24-sep-2025 | ✅ | |
+| Validación de imágenes con IA en «user input» | changelog 24-may-2026 | ❌ | |
+| Secuencias drip, auto-stop al responder, inscripción por etiqueta | `/features/drip-campaigns` | ✅ | |
+| Estadísticas por paso (aperturas/clics) | drip-campaigns | ⚠️ | inscritos activos/completados/detenidos |
+| Horario comercial por día; el bot responde solo fuera de horario | changelog | ✅ | |
+| Seguimientos inteligentes a clientes que no responden | `/features/ai-agent` | ✅ | requiere cron (ver README) |
+| Webhook Workflow entrante | `/features/webhook-workflow` | ✅ | |
+| Formularios dentro del chat con validación y exportación | `/features/whatsapp-forms` | ✅ | preguntas una a una; no son los *WhatsApp Flows* nativos de Meta |
+| *WhatsApp Flows* nativos (multipantalla) | changelog may-2026 | ❌ | exigen cifrado de endpoint con Meta |
+| Reserva de citas con huecos, sin dobles reservas, recordatorios | `/features/appointment-booking` | ✅ | recordatorios con plantilla fuera de 24 h |
+| Sincronizar citas con un calendario externo | appointment-booking | ❌ | alternativa: workflow/HTTP a Cal.com |
+| Click-to-WhatsApp: origen, informe de conversión por anuncio | `/features/click-to-whatsapp-ads` | ✅ | `ctwa:<id>`; sin costes por anuncio |
+| Enviar datos de formularios a Google Sheets | changelog ene-2026 | ⚠️ | vía paso HTTP a un Apps Script |
+| Plantillas de flujo / asistente IA para crear flujos | changelog 7-jul-2026 | ❌ | |
+
+## Contactos
+
+| Función | Evidencia | Estado |
+|---|---|---|
+| Listas de contactos (distintas de etiquetas), importar a una lista | app: Subscriber Manager, changelog 25-ago | ✅ |
+| Filtros por etiqueta, lista, secuencia, estado y orden; estadísticas | app | ✅ |
+| Acciones masivas (etiquetas, listas, secuencia, bloquear, baja, eliminar) | app: Bulk Actions | ✅ |
+| Exportar CSV (con campos personalizados) | app: Export/Import | ✅ |
+| Perfil: resumen, etiquetas, listas, secuencias, flujos de entrada, campos, notas | app: pestañas del perfil | ✅ |
+| Informe descargable de campos personalizados | changelog 1-ene-2026 | ✅ (en la exportación) |
+| Reasignar al terminar una secuencia | changelog 7-abr-2026 | ❌ |
 
 ## Broadcasts
 
-| Función | Evidencia | Estado | Notas |
-|---|---|---|---|
-| Segmentar por etiquetas, exclusiones y campos | `/features/whatsapp-broadcast` | ✅ | con vista previa de audiencia |
-| Imagen y botones | idem | ✅ | |
-| Entrega/lectura por destinatario | idem | ✅ | vía webhook de estados de Meta |
-| Clics en botones | idem | ❌ | |
-| Programar envío | changelog | ✅ | |
-| Mensajes de marketing (categoría Meta) | changelog 19-feb-2026 | ⚠️ | la categoría se fija en la plantilla |
+| Función | Evidencia | Estado |
+|---|---|---|
+| Segmentar por etiquetas, exclusiones, listas y campos; vista previa de audiencia | `/features/whatsapp-broadcast` | ✅ |
+| Imagen y botones; programar envío | idem | ✅ |
+| Entrega y lectura por destinatario | idem | ✅ |
+| **Clics en botones** | idem | ✅ |
+| Métricas 30 días (campañas, completadas, tasa de lectura, enviados, fallidos) | app: Broadcast Center | ✅ |
+| Canal SMS | app | ❌ |
+| Mensajes de marketing (categoría Meta) | changelog 19-feb-2026 | ⚠️ la categoría se fija en la plantilla |
 
 ## Agente de IA
 
 | Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| Base de conocimiento: texto, web, Google Sheet | `/features/ai-agent` | ✅ | PDF/archivos: ❌ |
-| Acciones automáticas: etiquetas, campos, secuencias, flujos, traspaso | idem | ✅ | **solo sobre el contacto actual** (seguridad) |
+| Base de conocimiento: texto, web, Google Sheet, **archivos PDF/TXT/MD/CSV/JSON/HTML** | `/features/ai-agent` | ✅ | |
+| **Recuperación por relevancia** (solo los fragmentos útiles al prompt; menos tokens) | changelog 18-jul-2026 (vectorial) | ⚠️ | BM25 léxico con raíces en español, no embeddings |
+| Acciones automáticas: etiquetas, campos, secuencias, flujos, traspaso, resolver, bloquear, no responder | idem | ✅ | solo sobre el contacto actual |
 | Modo «todo» vs «solo si no hay flujo» | idem | ✅ | |
-| Espera antes de responder, temas restringidos | idem, changelog 19-feb | ✅ | |
-| Escalar por sentimiento negativo | idem | ✅ | |
-| Entiende imágenes y notas de voz | idem | ❌ | |
-| Entrenamiento vectorial (RAG) | changelog 18-jul-2026 | ❌ | hoy se inyecta el texto en el prompt (límite ~24 000 caracteres) |
+| Espera, temas restringidos, escalado por sentimiento | idem, changelog | ✅ | |
+| Entiende imágenes y notas de voz | idem | ❌ | exige descargar medios de Meta y un modelo con visión/transcripción |
+| Varios agentes con configuración propia | app: AI → Agents | ❌ | |
 
 ## API, webhooks y MCP
 
 | Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| API REST con clave | `/features/rest-api` | ✅ | base `/api`, no `/api/v1` ni GET/POST indistinto |
-| Varias claves con permisos, desactivar, borrar | changelog 11-oct-2026 | ✅ | permisos leer / escribir / enviar |
-| Registro de uso de la API | changelog 18-ago-2026 | ✅ | |
-| Webhooks salientes: entrante, saliente, estado | `/features/incoming-outgoing-webhooks` | ✅ | firmados con HMAC |
-| Endpoints: notas, CRM overview, equipo, estado de conversación | changelog 16-ago / 7-oct | ✅ | |
-| Servidor MCP (≈43 tools) | `/mcp` | ✅ (≈35) | reconstruido: el anterior eran stubs que no hacían nada |
-| MCP: docs/guías, órdenes, catálogo | `/mcp` | ⛔ / ❌ | órdenes y catálogo excluidos |
+| **API v1 compatible**: mismos endpoints y parámetros (`apiToken`, `phone_number_id`…), GET/POST, respuestas `status 1/0` | consola de desarrolladores | ✅ | 38 de 42; ver CHATSYNCS_API_V1.md |
+| Varias claves con permisos, desactivar, borrar, registro de uso | changelog 11-oct, 18-ago | ✅ | |
+| Webhooks salientes: entrante, saliente, estado (+ formulario y cita) | `/features/incoming-outgoing-webhooks` | ✅ | firmados con HMAC |
+| Servidor MCP | `/mcp` | ✅ (41 tools) | reconstruido; el original eran stubs |
+| MCP: órdenes y catálogo | `/mcp` | ⛔ | |
 
 ## Seguridad y cuenta
 
 | Función | Evidencia | Estado | Notas |
 |---|---|---|---|
-| 2FA, registro de accesos, «direct login» | changelog 14-abr-2026 | ❌ | un solo usuario |
-| IP allowlist | changelog 20-abr-2026 | ❌ | |
-| Credenciales enmascaradas | changelog 17-feb-2026 | ✅ | las variables sensibles no se leen |
-| Importar contactos asignando lista | changelog 25-ago-2026 | ✅ | CSV con columna `labels` |
-| Borrado de datos/medios con registro | changelog 11-ago-2026 | ⚠️ | se puede borrar; sin registro de auditoría |
+| Acceso por IP (allowlist) con protección anti-bloqueo | changelog 20-abr-2026, app: IP Manager | ✅ | IPv4/IPv6 exactas y CIDR IPv4 |
+| Registro de accesos (correctos y fallidos) y límite de intentos | app: Login Activity Logs | ✅ | 10 fallos / 15 min por IP |
+| Sesiones activas y cierre remoto | app: Logged-in Devices | ❌ | |
+| 2FA | changelog 14-abr-2026 | ❌ | |
+| Alertas de acceso por Telegram | app: Login Alert Telegram | ❌ | |
+| Registro de borrado de datos/medios | changelog 11-ago-2026 | ❌ | |
+| Credenciales enmascaradas | changelog 17-feb-2026 | ✅ | |
+| Contraseñas con scrypt, sesiones firmadas con HMAC | — | ✅ | |
+| Cuotas de uso por plan (suscriptores/mensajes/tokens) | app: Dashboard | ⛔ | son límites de facturación |
 
 ## Fuera de alcance técnico (no se intenta)
 
-Canales Instagram, Messenger, Telegram y WebChat; módulo de revendedores; reservas de soporte por Google Meet (servicio humano
-de la empresa); Subscriber IQ continuo en segundo plano.
+Canales Instagram, Messenger, Telegram y WebChat; conexión de tiendas (Shopify/WooCommerce/Salla); módulo de revendedores;
+reservas de soporte por Google Meet y *Chatty AI* (servicios de la empresa).
 
 ## Defectos de la versión anterior que este trabajo corrigió
 
-- El «servidor MCP de 43 herramientas» **no hacía nada**: cada herramienta devolvía un eco. Reconstruido en `src/mcp/server.ts`.
-- Se exponían **todas las herramientas de administración al agente de IA de cara al cliente** (enviar a cualquier número, leer
-  contactos). Ahora solo tiene acciones acotadas al contacto de la conversación.
+- El «servidor MCP de 43 herramientas» **no hacía nada**: cada herramienta devolvía un eco. Reconstruido.
+- Se exponían **todas las herramientas de administración al agente de IA de cara al cliente**. Ahora solo tiene acciones
+  acotadas al contacto de la conversación.
 - Webhook de Meta con formato incorrecto, sin guardar mensajes, sin validar firma y sin autenticación en toda la API.
 - `PATCH /subscribers` borraba los campos personalizados; las esperas de días bloqueaban la función serverless.
+- Una regla de IP como `1.2.3.4/` se leía como `/0` (todas las IPs); detectado por un test y corregido.
 
 ## Siguiente trabajo recomendado
 
-1. Conectar un número de WhatsApp de prueba (lo más importante: nada de Meta se ha probado de verdad).
-2. Login por agente y enmascarado de teléfonos.
-3. Entrenamiento por archivos (PDF) y RAG con embeddings.
-4. Formularios/WhatsApp Flows y reserva de citas.
-5. Informe de clics y de costes por anuncio.
+1. **Conectar un número de WhatsApp de prueba**: nada de lo que depende de Meta se ha probado contra Meta real.
+2. Entender imágenes y notas de voz (descarga de medios + modelo con visión/transcripción).
+3. Embeddings para el conocimiento si la búsqueda léxica se queda corta.
+4. 2FA, sesiones activas con cierre remoto, alertas de acceso.
+5. Quick Actions / Outbound Actions y varios agentes de IA.

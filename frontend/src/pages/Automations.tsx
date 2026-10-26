@@ -13,6 +13,7 @@ const ACTIONS: Record<string, string> = {
   condition: 'Condición (si / si no)',
   wait: 'Esperar',
   http_request: 'Llamada HTTP',
+  book_slot: 'Reservar cita',
   set_field: 'Guardar campo',
   add_label: 'Añadir etiqueta',
   remove_label: 'Quitar etiqueta',
@@ -91,6 +92,8 @@ function summary(s: { action: string; params: Record<string, any>; delayDays?: n
     case 'add_label':
     case 'remove_label':
       return String(p.label ?? '?')
+    case 'book_slot':
+      return 'huecos en una lista'
     case 'http_request':
       return `${p.method ?? 'GET'} ${String(p.url ?? '').slice(0, 30)}`
     case 'set_field':
@@ -431,6 +434,14 @@ function StepFields({ step, steps, index, update }: { step: UiStep; steps: UiSte
             <span>→ guardar en</span>
             <div style={{ width: 170 }}>{fieldInput('http', p.saveField ?? '', (v) => set({ saveField: v }))}</div>
           </div>
+        </div>
+      )
+    case 'book_slot':
+      return (
+        <div className="grid" style={{ gap: 6 }}>
+          <input placeholder="Pregunta: ¿Qué horario te viene mejor?" value={p.body ?? ''} onChange={(e) => set({ body: e.target.value })} />
+          <input placeholder="Confirmación: ✅ Tu cita está confirmada para el {{fecha}} a las {{hora}}." value={p.confirmText ?? ''} onChange={(e) => set({ confirmText: e.target.value })} />
+          <span className="muted">Ofrece los próximos huecos libres en una lista y reserva el que elija (configura horarios en Citas).</span>
         </div>
       )
     case 'set_field':

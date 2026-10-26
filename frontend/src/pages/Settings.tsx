@@ -26,6 +26,8 @@ interface Settings {
   assignment: { mode: 'manual' | 'round_robin' }
   sandbox: { enabled: boolean }
   agent: { signature: string; translateLanguage: string }
+  security: { ipAllowlist: string[] }
+  followups: { enabled: boolean; afterHours: number; maxNudges: number; message: string; useAi: boolean }
 }
 
 const DAYS: [string, string][] = [
@@ -43,6 +45,7 @@ const TABS = [
   { id: 'hours', label: 'Horario comercial' },
   { id: 'ai', label: 'IA y asignación' },
   { id: 'agent', label: 'Mi cuenta' },
+  { id: 'security', label: 'Seguridad' },
   { id: 'data', label: 'Campos y respuestas rápidas' },
   { id: 'test', label: 'Consola de pruebas' },
 ]
@@ -81,7 +84,18 @@ export default function SettingsPage() {
       </div>
       {tab === 'connection' && <Connection account={account.data} settings={settings.data} onSandbox={(enabled) => save('sandbox', { enabled })} />}
       {tab === 'hours' && settings.data && <Hours value={settings.data.businessHours} onSave={(v) => save('businessHours', v)} />}
-      {tab === 'ai' && settings.data && <AiAssignment ai={settings.data.ai} assignment={settings.data.assignment} aiReady={account.data?.ai.ready ?? false} onAi={(v) => save('ai', v)} onAssignment={(v) => save('assignment', v)} />}
+      {tab === 'ai' && settings.data && (
+        <AiAssignment
+          ai={settings.data.ai}
+          assignment={settings.data.assignment}
+          followups={settings.data.followups}
+          aiReady={account.data?.ai.ready ?? false}
+          onAi={(v) => save('ai', v)}
+          onAssignment={(v) => save('assignment', v)}
+          onFollowups={(v) => save('followups', v)}
+        />
+      )}
+      {tab === 'security' && settings.data && <SecurityTab value={settings.data.security} onSave={(v) => save('security', v)} />}
       {tab === 'agent' && settings.data && <AgentTab value={settings.data.agent} onSave={(v) => save('agent', v)} />}
       {tab === 'data' && <DataTab />}
       {tab === 'test' && <TestConsole sandbox={settings.data?.sandbox.enabled ?? false} />}
@@ -207,7 +221,18 @@ function Hours({ value, onSave }: { value: Settings['businessHours']; onSave: (v
   )
 }
 
-function AiAssignment({ ai, assignment, aiReady, onAi, onAssignment }: { ai: Settings['ai']; assignment: Settings['assignment']; aiReady: boolean; onAi: (v: Settings['ai']) => Promise<void>; onAssignment: (v: Settings['assignment']) => Promise<void> }) {
+interface AiAssignmentProps {
+  ai: Settings['ai']
+  assignment: Settings['assignment']
+  followups: Settings['followups']
+  aiReady: boolean
+  onAi: (v: Settings['ai']) => Promise<void>
+  onAssignment: (v: Settings['assignment']) => Promise<void>
+  onFollowups: (v: Settings['followups']) => Promise<void>
+}
+
+function AiAssignment({ ai, assignment, followups, aiReady, onAi, onAssignment, onFollowups }: AiAssignmentProps) {
+  const [f, setF] = useState(followups)
   const [a, setA] = useState(ai)
   const [saved, setSaved] = useState('')
   const flash = (k: string) => {
@@ -243,6 +268,37 @@ function AiAssignment({ ai, assignment, aiReady, onAi, onAssignment }: { ai: Set
           }}
         >
           Guardar IA
+        </button>
+      </Card>
+      <Card title="Seguimientos inteligentes" actions={saved === 'fu' ? <Badge tone="green">Guardado</Badge> : undefined}>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Si el bot atendió una conversación y el cliente deja de contestar, se le envía un recordatorio breve. Solo dentro de la ventana de 24 h de WhatsApp y solo si nadie del equipo la tiene asignada. Se ejecuta con la tarea programada (cron).
+        </p>
+        <label className="check" style={{ marginBottom: 12 }}>
+          <input type="checkbox" checked={f.enabled} onChange={(e) => setF({ ...f, enabled: e.target.checked })} /> Activar seguimientos
+        </label>
+        <div className="grid grid-2">
+          <Field label="Esperar sin respuesta (horas)" hint="Menos de 23, para seguir dentro de la ventana.">
+            <input type="number" min={1} max={22} value={f.afterHours} onChange={(e) => setF({ ...f, afterHours: Number(e.target.value) })} />
+          </Field>
+          <Field label="Máximo de recordatorios por silencio">
+            <input type="number" min={1} max={5} value={f.maxNudges} onChange={(e) => setF({ ...f, maxNudges: Number(e.target.value) })} />
+          </Field>
+        </div>
+        <label className="check" style={{ marginBottom: 12 }}>
+          <input type="checkbox" checked={f.useAi} onChange={(e) => setF({ ...f, useAi: e.target.checked })} /> Redactarlo con la IA según la conversación (si está activa)
+        </label>
+        <Field label="Texto fijo (si la IA no está activa)" hint="Usa {{name}} para el nombre del cliente.">
+          <textarea style={{ minHeight: 70 }} value={f.message} onChange={(e) => setF({ ...f, message: e.target.value })} />
+        </Field>
+        <button
+          className="btn btn-primary"
+          onClick={async () => {
+            await onFollowups(f)
+            flash('fu')
+          }}
+        >
+          Guardar seguimientos
         </button>
       </Card>
       <Card title="Asignación de conversaciones nuevas" actions={saved === 'as' ? <Badge tone="green">Guardado</Badge> : undefined}>
@@ -441,6 +497,52 @@ function TestConsole({ sandbox }: { sandbox: boolean }) {
           ))}
         </ul>
       )}
+    </Card>
+  )
+}
+
+function SecurityTab({ value, onSave }: { value: Settings['security']; onSave: (v: Settings['security']) => Promise<void> }) {
+  const me = useAsync(() => api<{ ip?: string }>('/api/auth/me'))
+  const [text, setText] = useState(value.ipAllowlist.join('\n'))
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
+  const parse = (t: string) => t.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean)
+
+  async function save() {
+    setError('')
+    try {
+      await onSave({ ipAllowlist: parse(text) })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  const myIp = me.data?.ip
+  return (
+    <Card title="Accesos permitidos por IP" actions={saved ? <Badge tone="green">Guardado</Badge> : value.ipAllowlist.length ? <Badge tone="amber">Restringido</Badge> : <Badge>Abierto</Badge>}>
+      <ErrorNote message={error} />
+      <p className="muted" style={{ marginTop: 0 }}>
+        Si añades direcciones, solo se podrá entrar al panel, a la API y al MCP desde ellas. Déjalo vacío para permitir cualquier IP. El webhook de Meta y las tareas programadas no se ven afectados. No se puede guardar una lista que no incluya tu IP actual.
+      </p>
+      <p>
+        Tu IP actual: <span className="mono">{myIp ?? '…'}</span>{' '}
+        {myIp && (
+          <button className="btn btn-sm" onClick={() => setText((t) => (parse(t).includes(myIp) ? t : (t.trim() ? t.trim() + '\n' : '') + myIp))}>
+            Añadir mi IP
+          </button>
+        )}
+      </p>
+      <Field label="IPs o rangos (uno por línea)" hint="Ejemplos: 203.0.113.5 · 203.0.113.0/24">
+        <textarea style={{ minHeight: 110 }} className="mono" value={text} onChange={(e) => setText(e.target.value)} />
+      </Field>
+      <button className="btn btn-primary" onClick={save}>
+        Guardar
+      </button>
+      <p className="muted" style={{ marginBottom: 0 }}>
+        El registro de accesos está en Equipo. Si alguna vez te bloqueas, quita la regla desde la base de datos (tabla Setting, clave «security»).
+      </p>
     </Card>
   )
 }

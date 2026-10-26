@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, initials, timeAgo } from '../api'
 import type { Conversation } from '../api'
+import { useMe } from '../auth'
 import { Avatar, Badge, ErrorNote, Modal, useAsync } from '../ui'
 
 interface Member {
@@ -72,7 +73,10 @@ export default function Inbox() {
   const [tab, setTab] = useState('open')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
-  const [me, setMe] = useState(readMe)
+  const who = useMe()
+  const [picked, setMe] = useState(readMe)
+  // Con cuenta propia, «Mías» son las asignadas a tu nombre; con la clave compartida se elige quién eres
+  const me = who.id ? who.name : picked
 
   const list = useAsync(() => api<Conversation[]>(`/api/conversations?${queryFor(tab, search, me)}`), [tab, search, me])
   const team = useAsync(() => api<Member[]>('/api/team'))
@@ -99,10 +103,10 @@ export default function Inbox() {
             ))}
           </div>
         </div>
-        {tab === 'mine' && (
+        {tab === 'mine' && !who.id && (
           <div style={{ padding: '0 12px 8px' }}>
             <select
-              value={me}
+              value={picked}
               onChange={(e) => {
                 setMe(e.target.value)
                 try {
@@ -460,7 +464,7 @@ function Side({ id }: { id: string }) {
     setIqBusy(true)
     setIqError('')
     try {
-      setIq(await api<Insights>(`/api/subscribers/${c.subscriber.phone}/insights`))
+      setIq(await api<Insights>(`/api/subscribers/${c.subscriber.id}/insights`))
     } catch (e) {
       setIqError((e as Error).message.includes('AI_API_KEY') ? 'Activa la IA (AI_API_KEY) para usar Subscriber IQ.' : (e as Error).message)
     } finally {

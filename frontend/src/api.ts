@@ -118,6 +118,7 @@ export interface Broadcast {
   sentCount: number
   deliveredCount: number
   readCount: number
+  clickedCount?: number
   failedCount: number
   audience: { all?: boolean; labels?: string[]; excludeLabels?: string[]; fields?: { field: string; op: string; value?: string }[] }
   scheduledAt?: string | null

@@ -72,6 +72,7 @@ export default function Broadcasts() {
                   <th>Enviados</th>
                   <th>Entregados</th>
                   <th>Leídos</th>
+                  <th>Clics</th>
                   <th>Fallidos</th>
                   <th />
                 </tr>
@@ -91,6 +92,7 @@ export default function Broadcasts() {
                     <td>{b.sentCount}</td>
                     <td>{b.deliveredCount}</td>
                     <td>{b.readCount}</td>
+                    <td>{b.clickedCount ?? 0}</td>
                     <td>{b.failedCount}</td>
                     <td>
                       <div className="row" style={{ justifyContent: 'flex-end' }}>

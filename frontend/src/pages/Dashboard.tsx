@@ -14,6 +14,15 @@ interface Overview {
   broadcasts30?: { campaigns: number; completed: number; messagesSent: number; failed: number; avgOpenRate: number }
 }
 
+interface SourceRow {
+  source: string
+  kind: string
+  subscribers: number
+  won: number
+  wonValue: number
+  conversion: number
+}
+
 interface Account {
   whatsapp: { configured: boolean }
   ai: { ready: boolean; model?: string }
@@ -39,8 +48,13 @@ function Stat({ label, value, hint }: { label: string; value: string | number; h
 
 export default function Dashboard() {
   const { data, error, loading } = useAsync(async () => {
-    const [overview, account, knowledge] = await Promise.all([api<Overview>('/api/analytics/overview'), api<Account>('/api/account'), api<unknown[]>('/api/knowledge')])
-    return { overview, account, knowledge: knowledge.length }
+    const [overview, account, knowledge, sources] = await Promise.all([
+      api<Overview>('/api/analytics/overview'),
+      api<Account>('/api/account'),
+      api<unknown[]>('/api/knowledge'),
+      api<SourceRow[]>('/api/analytics/sources'),
+    ])
+    return { overview, account, knowledge: knowledge.length, sources }
   })
 
   if (loading && !data) return <Page title="Panel">Cargando…</Page>
@@ -161,6 +175,42 @@ export default function Dashboard() {
               {data?.account.ai.ready && <span className="muted">· modelo {data.account.ai.model}</span>}
             </div>
           </Card>
+
+          {data && data.sources.length > 0 && (
+            <Card title="Origen de los leads">
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Origen</th>
+                      <th>Contactos</th>
+                      <th>Oportunidades ganadas</th>
+                      <th>Conversión</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.sources.map((r) => (
+                      <tr key={r.source}>
+                        <td>
+                          {r.kind === 'anuncio' ? '📣 Anuncio ' : ''}
+                          <span className="mono">{r.source}</span>
+                        </td>
+                        <td>{r.subscribers}</td>
+                        <td>
+                          {r.won}
+                          {r.wonValue > 0 ? ' · ' + r.wonValue.toLocaleString() : ''}
+                        </td>
+                        <td>{r.conversion}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="muted" style={{ marginBottom: 0 }}>
+                Los chats que llegan desde un anuncio de Click-to-WhatsApp se guardan como «ctwa:&lt;id del anuncio&gt;».
+              </p>
+            </Card>
+          )}
 
           <Card title="Etiquetas principales">
             {o.labels.length === 0 ? (

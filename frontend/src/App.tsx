@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { api, getKey, setKey } from './api'
+import { ApiError, api, getKey, setKey } from './api'
+import { MeContext } from './auth'
+import type { Me } from './auth'
 import { ErrorNote } from './ui'
 import Dashboard from './pages/Dashboard'
 import Inbox from './pages/Inbox'
@@ -15,15 +17,26 @@ import Integrations from './pages/Integrations'
 import Team from './pages/Team'
 import Settings from './pages/Settings'
 import Workflows from './pages/Workflows'
+import Forms from './pages/Forms'
+import Appointments from './pages/Appointments'
 
-const NAV: { group: string; items: { to: string; icon: string; label: string }[] }[] = [
+interface NavItem {
+  to: string
+  icon: string
+  label: string
+  /** Si es true también lo ven las personas del equipo con rol «agente». */
+  agent?: boolean
+}
+
+const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: 'Conversaciones',
     items: [
       { to: '/', icon: '▦', label: 'Panel' },
-      { to: '/inbox', icon: '💬', label: 'Bandeja' },
-      { to: '/contacts', icon: '👥', label: 'Contactos' },
-      { to: '/crm', icon: '◈', label: 'CRM' },
+      { to: '/inbox', icon: '💬', label: 'Bandeja', agent: true },
+      { to: '/contacts', icon: '👥', label: 'Contactos', agent: true },
+      { to: '/crm', icon: '◈', label: 'CRM', agent: true },
+      { to: '/appointments', icon: '📅', label: 'Citas', agent: true },
     ],
   },
   {
@@ -31,6 +44,7 @@ const NAV: { group: string; items: { to: string; icon: string; label: string }[]
     items: [
       { to: '/broadcasts', icon: '📣', label: 'Broadcasts' },
       { to: '/automations', icon: '⚡', label: 'Secuencias y flujos' },
+      { to: '/forms', icon: '📋', label: 'Formularios' },
       { to: '/workflows', icon: '↯', label: 'Webhook Workflows' },
       { to: '/templates', icon: '📄', label: 'Plantillas' },
       { to: '/ai', icon: '✦', label: 'Agente IA' },
@@ -47,7 +61,10 @@ const NAV: { group: string; items: { to: string; icon: string; label: string }[]
 ]
 
 function Login({ onLogin }: { onLogin: () => void }) {
+  const [mode, setMode] = useState<'admin' | 'team'>('team')
   const [key, setValue] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -56,15 +73,18 @@ function Login({ onLogin }: { onLogin: () => void }) {
     setBusy(true)
     setError('')
     try {
-      await api('/api/account', { key: key.trim() })
-      setKey(key.trim())
+      const res = await api<{ token: string }>('/api/auth/login', { key: ' ', body: mode === 'admin' ? { key: key.trim() } : { email: email.trim(), password } })
+      setKey(res.token)
       onLogin()
-    } catch {
-      setError('Clave incorrecta o servidor no disponible.')
+    } catch (err) {
+      const msg = (err as Error).message
+      setError((err as ApiError).status === 429 ? 'Demasiados intentos fallidos. Espera unos minutos.' : msg === 'ip_not_allowed' ? 'Tu IP no está en la lista de accesos permitidos.' : 'Datos incorrectos o servidor no disponible.')
     } finally {
       setBusy(false)
     }
   }
+
+  const ready = mode === 'admin' ? Boolean(key.trim()) : Boolean(email.trim() && password)
 
   return (
     <div className="login">
@@ -72,16 +92,33 @@ function Login({ onLogin }: { onLogin: () => void }) {
         <div className="brand" style={{ padding: '0 0 16px' }}>
           <span className="brand-dot">C</span> ChatSyncs
         </div>
-        <h3 style={{ marginBottom: 4 }}>Acceso privado</h3>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Introduce tu clave de administrador (ADMIN_API_KEY).
-        </p>
-        <ErrorNote message={error} />
-        <div className="field">
-          <span>Clave de acceso</span>
-          <input type="password" autoFocus autoComplete="current-password" value={key} onChange={(e) => setValue(e.target.value)} />
+        <div className="tabs">
+          <button type="button" className={`tab ${mode === 'team' ? 'active' : ''}`} onClick={() => setMode('team')}>
+            Equipo
+          </button>
+          <button type="button" className={`tab ${mode === 'admin' ? 'active' : ''}`} onClick={() => setMode('admin')}>
+            Administrador
+          </button>
         </div>
-        <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} disabled={!key.trim() || busy}>
+        <ErrorNote message={error} />
+        {mode === 'admin' ? (
+          <div className="field">
+            <span>Clave de administrador</span>
+            <input type="password" autoFocus autoComplete="current-password" value={key} onChange={(e) => setValue(e.target.value)} />
+          </div>
+        ) : (
+          <>
+            <div className="field">
+              <span>Email</span>
+              <input type="email" autoFocus autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
+            </div>
+            <div className="field">
+              <span>Contraseña</span>
+              <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+          </>
+        )}
+        <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} disabled={!ready || busy}>
           {busy ? 'Comprobando…' : 'Entrar'}
         </button>
       </form>
@@ -89,15 +126,18 @@ function Login({ onLogin }: { onLogin: () => void }) {
   )
 }
 
-function Shell({ onLogout }: { onLogout: () => void }) {
+function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
+  const isAgent = me.role === 'agent'
+  const groups = NAV.map((g) => ({ ...g, items: g.items.filter((i) => !isAgent || i.agent) })).filter((g) => g.items.length)
+
   return (
     <div className="shell">
       <aside className={`sidebar ${open ? 'open' : ''}`} onClick={() => setOpen(false)}>
         <div className="brand">
           <span className="brand-dot">C</span> ChatSyncs
         </div>
-        {NAV.map((g) => (
+        {groups.map((g) => (
           <div key={g.group}>
             <div className="nav-group">{g.group}</div>
             {g.items.map((i) => (
@@ -109,6 +149,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           </div>
         ))}
         <div className="sidebar-foot">
+          {me.name && me.name !== 'Admin' && (
+            <div className="muted" style={{ padding: '0 10px 8px' }}>
+              {me.name} · {isAgent ? 'Agente' : 'Admin'}
+            </div>
+          )}
           <button className="btn btn-sm" style={{ width: '100%', justifyContent: 'center' }} onClick={onLogout}>
             Cerrar sesión
           </button>
@@ -119,19 +164,25 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           ☰ Menú
         </button>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          {!isAgent && <Route path="/" element={<Dashboard />} />}
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/crm" element={<CRM />} />
-          <Route path="/broadcasts" element={<Broadcasts />} />
-          <Route path="/automations" element={<Automations />} />
-          <Route path="/templates" element={<Templates />} />
-          <Route path="/workflows" element={<Workflows />} />
-          <Route path="/ai" element={<AIAgent />} />
-          <Route path="/integrations" element={<Integrations />} />
-          <Route path="/team" element={<Team />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="/appointments" element={<Appointments />} />
+          {!isAgent && (
+            <>
+              <Route path="/broadcasts" element={<Broadcasts />} />
+              <Route path="/automations" element={<Automations />} />
+              <Route path="/forms" element={<Forms />} />
+              <Route path="/workflows" element={<Workflows />} />
+              <Route path="/templates" element={<Templates />} />
+              <Route path="/ai" element={<AIAgent />} />
+              <Route path="/integrations" element={<Integrations />} />
+              <Route path="/team" element={<Team />} />
+              <Route path="/settings" element={<Settings />} />
+            </>
+          )}
+          <Route path="*" element={<Navigate to={isAgent ? '/inbox' : '/'} replace />} />
         </Routes>
       </main>
     </div>
@@ -140,25 +191,40 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(Boolean(getKey()))
+  const [me, setMe] = useState<Me | null>(null)
 
   useEffect(() => {
     const onUnauthorized = () => {
       setKey('')
+      setMe(null)
       setAuthed(false)
     }
     window.addEventListener('chatsyncs:unauthorized', onUnauthorized)
     return () => window.removeEventListener('chatsyncs:unauthorized', onUnauthorized)
   }, [])
 
+  // Una vez dentro se consulta el rol para mostrar solo lo que corresponde
+  useEffect(() => {
+    if (!authed) return
+    api<Me>('/api/auth/me')
+      .then(setMe)
+      .catch(() => undefined)
+  }, [authed])
+
   if (!authed) return <Login onLogin={() => setAuthed(true)} />
+  if (!me) return <div className="login muted">Cargando…</div>
   return (
-    <BrowserRouter>
-      <Shell
-        onLogout={() => {
-          setKey('')
-          setAuthed(false)
-        }}
-      />
-    </BrowserRouter>
+    <MeContext.Provider value={me}>
+      <BrowserRouter>
+        <Shell
+          me={me}
+          onLogout={() => {
+            setKey('')
+            setMe(null)
+            setAuthed(false)
+          }}
+        />
+      </BrowserRouter>
+    </MeContext.Provider>
   )
 }

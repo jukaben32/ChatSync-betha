@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { api, getKey, initials, timeAgo } from '../api'
 import type { Label, Sequence, Subscriber } from '../api'
+import { useMe } from '../auth'
 import { Avatar, Badge, Card, Empty, ErrorNote, Field, Modal, Page, useAsync } from '../ui'
 
 interface ListResponse {
@@ -50,6 +51,7 @@ function parseCsv(text: string) {
 const STATUS_TONE = { subscribed: 'green', unsubscribed: 'amber', blocked: 'red' } as const
 
 export default function Contacts() {
+  const isAgent = useMe().role === 'agent'
   const [q, setQ] = useState('')
   const [label, setLabel] = useState('')
   const [list, setList] = useState('')
@@ -66,7 +68,7 @@ export default function Contacts() {
 
   const params = new URLSearchParams({ ...(q && { q }), ...(label && { label }), ...(list && { list }), ...(sequence && { sequence }), ...(status && { status }), sort })
   const rows = useAsync(() => api<ListResponse>(`/api/subscribers?${params}`), [q, label, list, sequence, status, sort])
-  const stats = useAsync(() => api<Stats>('/api/subscribers/stats'))
+  const stats = useAsync(() => (isAgent ? Promise.resolve(null) : api<Stats>('/api/subscribers/stats')))
   const labels = useAsync(() => api<Label[]>('/api/labels'))
   const lists = useAsync(() => api<AudienceList[]>('/api/lists'))
   const sequences = useAsync(() => api<Sequence[]>('/api/sequences?kind=sequence'))
@@ -132,13 +134,17 @@ export default function Contacts() {
       subtitle="Gestiona y segmenta a tu audiencia"
       actions={
         <>
-          <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={onFile} />
-          <button className="btn" onClick={() => fileRef.current?.click()}>
-            Importar CSV
-          </button>
-          <button className="btn" onClick={exportCsv}>
-            Exportar CSV
-          </button>
+          {!isAgent && (
+            <>
+              <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={onFile} />
+              <button className="btn" onClick={() => fileRef.current?.click()}>
+                Importar CSV
+              </button>
+              <button className="btn" onClick={exportCsv}>
+                Exportar CSV
+              </button>
+            </>
+          )}
           <button className="btn btn-primary" onClick={() => setAdding(true)}>
             + Nuevo contacto
           </button>
@@ -210,7 +216,7 @@ export default function Contacts() {
           </select>
         </div>
 
-        {selected.length > 0 && (
+        {!isAgent && selected.length > 0 && (
           <div className="row" style={{ marginBottom: 12, padding: 10, background: 'var(--brand-soft)', borderRadius: 10 }}>
             <strong>{selected.length} seleccionados</strong>
             <select style={{ width: 200 }} value={bulk} onChange={(e) => setBulk(e.target.value)} aria-label="Acción masiva">
@@ -256,9 +262,9 @@ export default function Contacts() {
             <table>
               <thead>
                 <tr>
-                  <th style={{ width: 36 }}>
+                  {!isAgent && (<th style={{ width: 36 }}>
                     <input type="checkbox" aria-label="Seleccionar todos" checked={allSelected} onChange={(e) => setSelected(e.target.checked ? items.map((s) => s.phone) : [])} />
-                  </th>
+                  </th>)}
                   <th>Contacto</th>
                   <th>Teléfono</th>
                   <th>Etiquetas</th>
@@ -269,14 +275,14 @@ export default function Contacts() {
               <tbody>
                 {items.map((s) => (
                   <tr key={s.id} className="clickable" onClick={() => setDetail(s)}>
-                    <td onClick={(e) => e.stopPropagation()}>
+                    {!isAgent && (<td onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         aria-label={`Seleccionar ${s.name || s.phone}`}
                         checked={selected.includes(s.phone)}
                         onChange={(e) => setSelected(e.target.checked ? [...selected, s.phone] : selected.filter((p) => p !== s.phone))}
                       />
-                    </td>
+                    </td>)}
                     <td>
                       <div className="row">
                         <Avatar text={initials(s.name, s.phone)} />
@@ -387,7 +393,8 @@ interface Detail extends Subscriber {
 const TABS = ['Resumen', 'Etiquetas y listas', 'Secuencias y flujos', 'Campos', 'Notas']
 
 function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; onClose: () => void; onChanged: () => void }) {
-  const detail = useAsync(() => api<Detail>(`/api/subscribers/${subscriber.phone}`), [subscriber.phone])
+  const isAgent = useMe().role === 'agent'
+  const detail = useAsync(() => api<Detail>(`/api/subscribers/${subscriber.id}`), [subscriber.id])
   const defs = useAsync(() => api<{ key: string; label: string }[]>('/api/custom-fields'))
   const allSequences = useAsync(() => api<Sequence[]>('/api/sequences?kind=sequence'))
   const [tab, setTab] = useState(TABS[0])
@@ -404,25 +411,25 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
     onChanged()
   }
   const patch = async (body: Record<string, unknown>) => {
-    await api(`/api/subscribers/${base.phone}`, { method: 'PATCH', body })
+    await api(`/api/subscribers/${base.id}`, { method: 'PATCH', body })
     refresh()
   }
 
   async function addLabel() {
     if (!newLabel.trim()) return
-    await api(`/api/subscribers/${base.phone}/labels`, { body: { labels: [newLabel.trim()] } })
+    await api(`/api/subscribers/${base.id}/labels`, { body: { labels: [newLabel.trim()] } })
     setNewLabel('')
     refresh()
   }
   async function addList() {
     if (!newList.trim()) return
-    await api(`/api/subscribers/${base.phone}/lists`, { body: { lists: [newList.trim()] } })
+    await api(`/api/subscribers/${base.id}/lists`, { body: { lists: [newList.trim()] } })
     setNewList('')
     refresh()
   }
   async function remove() {
     if (!confirm(`¿Eliminar a ${base.name || base.phone} y todo su historial?`)) return
-    await api(`/api/subscribers/${base.phone}`, { method: 'DELETE' })
+    await api(`/api/subscribers/${base.id}`, { method: 'DELETE' })
     onChanged()
     onClose()
   }
@@ -435,9 +442,11 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
       title={base.name || `+${base.phone}`}
       onClose={onClose}
       footer={
-        <button className="btn btn-danger" onClick={remove}>
-          Eliminar contacto
-        </button>
+        isAgent ? undefined : (
+          <button className="btn btn-danger" onClick={remove}>
+            Eliminar contacto
+          </button>
+        )
       }
     >
       <p className="muted" style={{ marginTop: 0 }}>
@@ -482,7 +491,7 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
                   style={{ padding: 0 }}
                   aria-label={`Quitar ${l.label.name}`}
                   onClick={async () => {
-                    await api(`/api/subscribers/${base.phone}/labels/${l.label.id}`, { method: 'DELETE' })
+                    await api(`/api/subscribers/${base.id}/labels/${l.label.id}`, { method: 'DELETE' })
                     refresh()
                   }}
                 >
@@ -507,7 +516,7 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
                   style={{ padding: 0 }}
                   aria-label={`Quitar de ${l.list.name}`}
                   onClick={async () => {
-                    await api(`/api/subscribers/${base.phone}/lists/${l.list.id}`, { method: 'DELETE' })
+                    await api(`/api/subscribers/${base.id}/lists/${l.list.id}`, { method: 'DELETE' })
                     refresh()
                   }}
                 >
@@ -538,7 +547,7 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
                 <button
                   className="btn btn-sm"
                   onClick={async () => {
-                    await api(`/api/subscribers/${base.phone}/sequences/${e.sequenceId}`, { method: 'DELETE' })
+                    await api(`/api/subscribers/${base.id}/sequences/${e.sequenceId}`, { method: 'DELETE' })
                     refresh()
                   }}
                 >
@@ -578,7 +587,7 @@ function ContactDetail({ subscriber, onClose, onChanged }: { subscriber: Row; on
                 <button
                   className="btn btn-sm"
                   onClick={async () => {
-                    await api(`/api/subscribers/${base.phone}/reset-input-flow`, { body: {} })
+                    await api(`/api/subscribers/${base.id}/reset-input-flow`, { body: {} })
                     refresh()
                   }}
                 >

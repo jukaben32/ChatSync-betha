@@ -7,23 +7,31 @@ Sin pagos, planes ni facturación. Producción: https://chatsyncs-replica.vercel
 
 | Módulo | Estado |
 |---|---|
-| Bandeja compartida: asignación (manual o reparto equitativo), notas, seguimiento, archivar, respuestas rápidas, aviso de ventana de 24 h | ✅ |
+| Bandeja compartida: Mías / Sin asignar / No leídas / Importantes / Seguimiento / Archivadas / Bloqueados, notas, `/` respuestas rápidas, traducción | ✅ |
 | IA para el equipo: sugerir respuesta, mejorar redacción, Subscriber IQ | ✅ requiere `AI_API_KEY` |
-| Contactos: etiquetas, campos personalizados, importación CSV, bloqueo y baja (`STOP`) | ✅ |
-| Flujos de chatbot con ramas: botones, listas, preguntas validadas, condiciones, HTTP, esperas | ✅ |
-| Secuencias drip: inscripción por etiqueta, se detienen al responder | ✅ |
-| Broadcasts: segmentación (etiquetas, exclusiones, campos), imagen, botones, programación, entrega/lectura | ✅ |
-| Webhook Workflows entrantes (URL propia, mapeo de campos, condiciones, retraso, acciones) | ✅ |
+| Contactos: listas, etiquetas, campos, filtros, acciones masivas, importar/exportar CSV, bloqueo y baja (`STOP`) | ✅ |
+| Flujos con ramas: botones, listas, preguntas validadas, condiciones, HTTP, esperas, reserva de citas | ✅ |
+| Respuestas por palabra clave con carpetas; secuencias drip que se detienen al responder | ✅ |
+| Formularios dentro del chat (validación, envíos, exportación) | ✅ |
+| Citas: huecos por zona horaria, sin dobles reservas, recordatorios | ✅ |
+| Broadcasts: segmentación, imagen, botones, programación, entrega/lectura/clics | ✅ |
+| Webhook Workflows entrantes; webhooks salientes firmados | ✅ |
 | Plantillas de WhatsApp (crear, enviar a Meta, sincronizar) | ✅ |
-| Agente IA: base de conocimiento (texto, web, Google Sheets), acciones sobre el contacto, traspaso a humano | ✅ requiere `AI_API_KEY` |
-| Horario comercial por día, aviso fuera de horario | ✅ |
-| CRM (pipeline), analítica, orígenes de leads | ✅ |
-| Webhooks salientes firmados, API keys con permisos y registro de uso | ✅ |
-| Servidor MCP por HTTP (`/api/mcp`, 35 herramientas reales) | ✅ |
+| Agente IA: conocimiento por texto/web/Sheets/PDF con recuperación por fragmentos, acciones sobre el contacto, traspaso a humano, seguimientos inteligentes | ✅ requiere `AI_API_KEY` |
+| Horario comercial por día; asignación por reparto equitativo | ✅ |
+| Equipo con cuentas (admin/agente), teléfonos enmascarados, registro de accesos, lista de IPs | ✅ |
+| API v1 **compatible con ChatSyncs** (`/api/v1`, 38 endpoints) y API propia con claves con permisos y registro de uso | ✅ |
+| Servidor MCP por HTTP (`/api/mcp`, 41 herramientas reales) | ✅ |
+| CRM (pipeline), analítica, orígenes de leads (anuncios Click-to-WhatsApp) | ✅ |
 | Modo simulación y consola de pruebas (probar todo sin WhatsApp) | ✅ |
 | WhatsApp Cloud API real | ⏳ faltan credenciales de Meta; nada se ha probado contra Meta |
 
-Qué falta respecto a ChatSyncs y por qué: [docs/GAP_ANALYSIS.md](docs/GAP_ANALYSIS.md). Sin pagos, pedidos ni catálogo (uso privado).
+Qué falta respecto a ChatSyncs y por qué: [docs/GAP_ANALYSIS.md](docs/GAP_ANALYSIS.md). Contrato de la API v1: [docs/CHATSYNCS_API_V1.md](docs/CHATSYNCS_API_V1.md). Sin pagos, pedidos ni catálogo (uso privado).
+
+## Acceso
+
+- **Administrador:** clave `ADMIN_API_KEY` (pestaña «Administrador» del login).
+- **Equipo:** cada persona entra con email y contraseña (Equipo → Añadir miembro). Rol *agente*: atiende bandeja, contactos, CRM y citas, ve los teléfonos enmascarados y no puede configurar, exportar ni borrar contactos.
 
 ## Arquitectura
 
