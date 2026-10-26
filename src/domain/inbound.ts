@@ -1,78 +1,124 @@
 import { prisma } from '../prisma.js';
-import { sendWhatsAppText } from '../whatsapp/client.js';
 import { runFlow } from '../flows/engine.js';
-import { runAgentTurn } from '../ai/agent.js';
+import { agentReady, runAgentTurn } from '../ai/agent.js';
+import { emitEvent } from './events.js';
+import { getOrCreateConversation, sendAndRecord } from './messaging.js';
 
 export interface InboundContext {
   phone: string;
   name?: string;
   body?: string;
-  mediaUrl?: string;
   providerMessageId?: string;
-  direction?: 'inbound' | 'outbound';
+  messageType?: string;
 }
 
+const STOP_WORDS = ['stop', 'baja', 'cancelar suscripcion', 'cancelar suscripción'];
+
 /**
- * Procesa un inbound de WhatsApp: upsert de suscriptor, conversación,
- * mensaje, y disparo del flujo (bot / AI agent).
+ * Procesa un mensaje entrante de WhatsApp:
+ * 1) upsert del suscriptor y de la conversación abierta, 2) guarda el mensaje (idempotente por id de Meta),
+ * 3) si la conversación está en manos de un humano no responde el bot, 4) si coincide una palabra clave
+ * dispara el flujo, 5) si no, responde el agente de IA (si está configurado).
  */
 export async function handleInbound(params: InboundContext) {
-  const { phone, name, body, mediaUrl, providerMessageId, direction = 'inbound' } = params;
+  const { phone, name, body = '', providerMessageId, messageType } = params;
 
+  const existingSubscriber = await prisma.subscriber.findUnique({ where: { phone } });
   const subscriber = await prisma.subscriber.upsert({
     where: { phone },
-    update: { name: name ?? undefined },
-    create: { phone, name: name ?? undefined },
+    update: name && !existingSubscriber?.name ? { name } : {},
+    create: { phone, name, source: 'whatsapp' },
   });
-
-  const conversation = await prisma.conversation.create({
-    data: { subscriberId: subscriber.id, status: 'open' },
-  });
+  if (!existingSubscriber) await emitEvent('subscriber.created', { phone, name });
 
   if (providerMessageId) {
-    await prisma.message.create({
-      data: { conversationId: conversation.id, direction, providerMessageId, body: body ?? '' },
-    });
+    const duplicate = await prisma.message.findFirst({ where: { providerMessageId } });
+    if (duplicate) return { subscriber, conversationId: duplicate.conversationId, duplicate: true };
   }
 
-  // Bot flow: si hay pasos configurados, se dispara el flujo (o el agente)
-  const flow = await prisma.sequence.findFirst({
-    where: { steps: { some: { action: 'send_text' } } },
+  const conversation = await getOrCreateConversation(subscriber.id);
+  const reopened = conversation.status === 'pending' || conversation.status === 'solved';
+  await prisma.message.create({
+    data: { conversationId: conversation.id, direction: 'inbound', providerMessageId, body, status: 'received', metadata: { type: messageType ?? 'text' } },
+  });
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { updatedAt: new Date(), ...(reopened && !conversation.assignedTo ? { status: 'open' } : {}) },
+  });
+  await emitEvent('message.received', { phone, conversationId: conversation.id, body, type: messageType ?? 'text' });
+
+  const text = body.trim().toLowerCase();
+  if (STOP_WORDS.includes(text)) {
+    await prisma.subscriber.update({ where: { id: subscriber.id }, data: { optedOut: true } });
+    return { subscriber, conversationId: conversation.id, optedOut: true };
+  }
+  if (subscriber.blocked || subscriber.optedOut) return { subscriber, conversationId: conversation.id };
+
+  // Conversación asignada a un humano: el bot no interviene.
+  if (conversation.assignedTo) return { subscriber, conversationId: conversation.id, handledBy: 'human' };
+
+  // 1) Flujo por palabra clave
+  const flows = await prisma.sequence.findMany({
+    where: { kind: 'flow', active: true, triggerKeyword: { not: null } },
     include: { steps: true },
   });
-
+  const flow = flows.find((f) => f.triggerKeyword && text.includes(f.triggerKeyword.toLowerCase()));
   if (flow) {
     await runFlow({ phone, flow: { id: flow.id, name: flow.name, steps: flow.steps as any } });
+    return { subscriber, conversationId: conversation.id, handledBy: 'flow', flow: flow.name };
   }
 
-  // AI agent turn (OpenAI-compatible). Disabled unless configured.
-  if (process.env.AI_AGENT_ENABLED !== 'false') {
-    const agentResult = await runAgentTurn({
-      messages: [{ role: 'user', content: `WhatsApp inbound from ${phone}: ${body ?? ''}`.trim() }],
-    });
-    // Agentic responses would be executed via executeChatsycsTool inside runAgentTurn.
-    // Persist final agent content as an outbound message when it carries text.
-    if (agentResult.content) {
-      await sendWhatsAppText({ to: phone, body: agentResult.content });
+  // 2) Agente de IA
+  if (agentReady()) {
+    const recent = await prisma.message.findMany({ where: { conversationId: conversation.id }, orderBy: { createdAt: 'desc' }, take: 12 });
+    const history = recent
+      .reverse()
+      .filter((m) => m.body)
+      .map((m) => ({ role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.body }));
+    const result = await runAgentTurn({ phone, conversationId: conversation.id, history });
+    if (result.ok && result.content) {
+      await sendAndRecord({ phone, body: result.content, conversationId: conversation.id });
+      return { subscriber, conversationId: conversation.id, handledBy: 'ai', handover: result.handover };
     }
   }
-
-  return { subscriber, conversation };
+  return { subscriber, conversationId: conversation.id };
 }
 
-/**
- * Envía una respuesta dentro de la conversación (outbound).
- */
-export async function handleOutbound(params: { conversationId: string; body: string; providerMessageId?: string }) {
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: params.conversationId },
-    include: { subscriber: true },
-  });
+const STATUS_RANK: Record<string, number> = { failed: 0, sent: 1, delivered: 2, read: 3 };
+
+/** Actualiza el estado de un mensaje y de su destinatario de broadcast (sent → delivered → read). */
+export async function handleStatusUpdate(params: { providerMessageId: string; status: string; error?: string }) {
+  const { providerMessageId, status, error } = params;
+
+  const message = await prisma.message.findFirst({ where: { providerMessageId } });
+  if (message && (STATUS_RANK[status] ?? -1) >= (STATUS_RANK[message.status] ?? 0)) {
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { status, ...(error ? { metadata: { ...(message.metadata as object), error } } : {}) },
+    });
+  }
+
+  const recipient = await prisma.broadcastRecipient.findFirst({ where: { providerMessageId } });
+  if (recipient && (STATUS_RANK[status] ?? -1) >= (STATUS_RANK[recipient.status] ?? 0)) {
+    await prisma.broadcastRecipient.update({ where: { id: recipient.id }, data: { status, ...(error ? { error } : {}) } });
+    const grouped = await prisma.broadcastRecipient.groupBy({ by: ['status'], where: { broadcastId: recipient.broadcastId }, _count: true });
+    const count = (s: string) => grouped.find((g) => g.status === s)?._count ?? 0;
+    await prisma.broadcast.update({
+      where: { id: recipient.broadcastId },
+      data: {
+        sentCount: count('sent') + count('delivered') + count('read'),
+        deliveredCount: count('delivered') + count('read'),
+        readCount: count('read'),
+        failedCount: count('failed'),
+      },
+    });
+  }
+  await emitEvent('message.status', { providerMessageId, status });
+}
+
+/** Envía una respuesta manual desde el inbox. */
+export async function handleOutbound(params: { conversationId: string; body: string }) {
+  const conversation = await prisma.conversation.findUnique({ where: { id: params.conversationId }, include: { subscriber: true } });
   if (!conversation) throw new Error('conversation_not_found');
-  const to = conversation.subscriber.phone;
-  const { providerMessageId } = await sendWhatsAppText({ to, body: params.body });
-  const message = await prisma.message.create({
-    data: { conversationId: params.conversationId, direction: 'outbound', providerMessageId, body: params.body },
-  });
-  return message;
+  return sendAndRecord({ phone: conversation.subscriber.phone, body: params.body, conversationId: conversation.id });
 }

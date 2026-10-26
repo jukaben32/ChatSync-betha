@@ -1,4 +1,5 @@
 import { CHATSYNC_TOOLS, executeChatsycsTool } from './tools.js';
+import { prisma } from '../prisma.js';
 
 export interface AgentConfig {
   enabled: boolean;
@@ -8,13 +9,20 @@ export interface AgentConfig {
   maxIterations: number;
 }
 
-const DEFAULT_CONFIG: AgentConfig = {
-  enabled: process.env.AI_AGENT_ENABLED !== 'false',
-  baseUrl: process.env.AI_BASE_URL ?? 'https://openrouter.ai/api/v1',
-  apiKey: process.env.AI_API_KEY ?? '',
-  model: process.env.AI_MODEL ?? 'openai/gpt-4o-mini',
-  maxIterations: Number(process.env.AI_MAX_ITERATIONS ?? 6),
-};
+export function agentConfig(): AgentConfig {
+  return {
+    enabled: process.env.AI_AGENT_ENABLED !== 'false',
+    baseUrl: process.env.AI_BASE_URL ?? 'https://openrouter.ai/api/v1',
+    apiKey: process.env.AI_API_KEY ?? '',
+    model: process.env.AI_MODEL ?? 'openai/gpt-4o-mini',
+    maxIterations: Number(process.env.AI_MAX_ITERATIONS ?? 6),
+  };
+}
+
+export function agentReady() {
+  const c = agentConfig();
+  return c.enabled && Boolean(c.apiKey);
+}
 
 function toJsonSchema(typeToken: string): Record<string, unknown> {
   switch (typeToken) {
@@ -23,110 +31,111 @@ function toJsonSchema(typeToken: string): Record<string, unknown> {
     case 'object':
       return { type: 'object' };
     case 'number':
-    case 'number?':
       return { type: 'number' };
-    case 'string?':
-    case 'string':
-      return { type: 'string' };
     default:
       return { type: 'string' };
   }
 }
 
 export function buildTools() {
-  return CHATSYNC_TOOLS.map((tool) => {
+  const tools = CHATSYNC_TOOLS.map((tool) => {
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
-    const schema = tool.inputSchema ?? {};
-    for (const [key, token] of Object.entries(schema)) {
-      const isOptional = typeof token === 'string' && token.endsWith('?');
+    for (const [key, token] of Object.entries(tool.inputSchema ?? {})) {
+      const optional = typeof token === 'string' && token.endsWith('?');
       properties[key] = toJsonSchema(String(token).replace(/\?$/, ''));
-      if (!isOptional) required.push(key);
+      if (!optional) required.push(key);
     }
     return {
       type: 'function' as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        inputSchema: { type: 'object', properties, required },
-      },
+      function: { name: tool.name, description: tool.description, parameters: { type: 'object', properties, required } },
     };
   });
+  tools.push({
+    type: 'function' as const,
+    function: {
+      name: 'handover_to_human',
+      description: 'Transfiere la conversación a un agente humano cuando el cliente lo pide o no puedes resolverlo.',
+      parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: [] },
+    },
+  });
+  return tools;
 }
 
-export async function runAgentTurn(params: { messages: Array<{ role: string; content: string; phone?: string }> }) {
-  const config = DEFAULT_CONFIG;
-  if (!config.enabled || !config.apiKey) {
-    return { ok: false, error: 'agent_disabled', reason: 'AI agent not configured' };
-  }
+async function systemPrompt() {
+  const sources = await prisma.knowledgeSource.findMany({ orderBy: { createdAt: 'asc' }, take: 50 });
+  const knowledge = sources.map((s) => `## ${s.title}\n${s.content}`).join('\n\n').slice(0, 24_000);
+  return [
+    process.env.AI_SYSTEM_PROMPT ??
+      'Eres un asistente de atención al cliente por WhatsApp. Responde en el idioma del cliente, de forma breve y amable.',
+    'Responde únicamente con información de la base de conocimiento. Si no la tienes, ofrece transferir a un humano.',
+    knowledge ? `\n# Base de conocimiento\n${knowledge}` : '',
+  ].join('\n');
+}
 
-  const messages: Array<Record<string, unknown>> = [];
-  for (const message of params.messages) {
-    messages.push({
-      role: message.role === 'assistant' ? 'assistant' : 'user',
-      content: message.content,
-      ...(message.phone ? { tool_choice: undefined } : {}),
-    });
-  }
+type ChatMessage = Record<string, unknown>;
 
-  const tools = buildTools();
-  let iterations = 0;
-  let finalContent: string = '';
-
-  let response: Response = await fetch(`${config.baseUrl}/chat/completions`, {
+async function complete(c: AgentConfig, messages: ChatMessage[], tools: unknown[]) {
+  const response = await fetch(`${c.baseUrl}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-    body: JSON.stringify({ model: config.model, messages, tools, max_tokens: 1024 }),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+    body: JSON.stringify({ model: c.model, messages, tools, max_tokens: 1024 }),
+    signal: AbortSignal.timeout(40_000),
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    return { ok: false, error: 'llm_error', message: errorText };
-  }
-  const completion = (await response.json()) as {
-    choices?: Array<{ message?: { role: string; content?: string; tool_calls?: Array<{ id: string; function?: { name?: string; arguments?: string } }> } }>;
+  if (!response.ok) throw new Error(`llm_error ${response.status}: ${await response.text()}`);
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ id: string; type?: string; function: { name: string; arguments?: string } }> } }>;
   };
-  let assistantMessage = completion.choices?.[0]?.message;
-  finalContent = assistantMessage?.content ?? '';
+  return data.choices?.[0]?.message;
+}
 
-  while (assistantMessage?.tool_calls?.length && iterations < config.maxIterations) {
-    iterations += 1;
-    const toolMessages: Array<Record<string, unknown>> = [
-      ...messages,
-      { role: 'assistant', content: finalContent || null, tool_calls: assistantMessage.tool_calls },
-    ];
-    const toolResults: Array<Record<string, unknown>> = [];
-    for (const toolCall of assistantMessage.tool_calls) {
-      const toolName = toolCall.function?.name ?? '';
-      const toolArgs = (toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {}) as Record<string, unknown>;
-      let toolResult: unknown = { ok: false, error: 'unknown_tool' };
-      try {
-        toolResult = await executeChatsycsTool(toolName, toolArgs);
-      } catch (error) {
-        toolResult = { ok: false, error: (error as Error).message };
+/**
+ * Un turno del agente: historial reciente + herramientas. Devuelve el texto final a enviar al cliente.
+ */
+export async function runAgentTurn(params: {
+  phone: string;
+  conversationId: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+}): Promise<{ ok: boolean; content?: string; handover?: boolean; error?: string }> {
+  const c = agentConfig();
+  if (!agentReady()) return { ok: false, error: 'agent_disabled' };
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: (await systemPrompt()) + `\n\nTeléfono del cliente: ${params.phone}` },
+    ...params.history,
+  ];
+  const tools = buildTools();
+  let handover = false;
+
+  try {
+    let reply = await complete(c, messages, tools);
+    for (let i = 0; i < c.maxIterations && reply?.tool_calls?.length; i++) {
+      messages.push({ role: 'assistant', content: reply.content ?? null, tool_calls: reply.tool_calls });
+      for (const call of reply.tool_calls) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+        } catch {
+          /* argumentos inválidos: se ejecuta con {} */
+        }
+        let result: unknown;
+        if (call.function.name === 'handover_to_human') {
+          handover = true;
+          await prisma.conversation.update({ where: { id: params.conversationId }, data: { assignedTo: 'human', status: 'pending' } });
+          result = { ok: true };
+        } else {
+          try {
+            result = await executeChatsycsTool(call.function.name, { phone: params.phone, ...args });
+          } catch (e) {
+            result = { ok: false, error: (e as Error).message };
+          }
+        }
+        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }
-      toolMessages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id ?? '',
-        name: toolName,
-        content: JSON.stringify(toolResult),
-      });
+      reply = await complete(c, messages, tools);
     }
-    finalContent = '';
-    let response2: Response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({ model: config.model, messages: toolMessages, tools, max_tokens: 1024 }),
-    });
-    if (!response2.ok) {
-      const errorText = await response2.text();
-      return { ok: false, error: 'llm_error', message: errorText };
-    }
-    const completion2 = (await response2.json()) as {
-      choices?: Array<{ message?: { role: string; content?: string; tool_calls?: Array<{ id: string; function?: { name?: string; arguments?: string } }> } }>;
-    };
-    assistantMessage = completion2.choices?.[0]?.message;
-    finalContent = assistantMessage?.content ?? '';
+    return { ok: true, content: reply?.content?.trim() || undefined, handover };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
   }
-
-  return { ok: true, content: finalContent, iterations };
 }

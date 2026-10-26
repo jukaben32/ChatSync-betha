@@ -12,7 +12,9 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:studio": "prisma studio",
     "build": "prisma generate && tsc -p tsconfig.json",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "build:web": "npm --prefix frontend ci && npm --prefix frontend run build",
+    "build:all": "npm run build && npm run build:web"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

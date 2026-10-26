@@ -1,6 +1,8 @@
 export const config = {
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/chatsyncs',
+  adminApiKey: process.env.ADMIN_API_KEY ?? '',
+  cronSecret: process.env.CRON_SECRET ?? '',
   whatsapp: {
     businessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID ?? '',
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? '',
@@ -15,3 +17,7 @@ export const config = {
     apiKey: process.env.MCP_API_KEY ?? '',
   },
 };
+
+export function whatsappConfigured() {
+  return Boolean(config.whatsapp.phoneNumberId && config.whatsapp.accessToken);
+}

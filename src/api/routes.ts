@@ -1,48 +1,116 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../prisma.js';
-import { sendBroadcast } from '../domain/broadcasts.js';
-import { triggerBotFlowForSubscriber } from '../domain/sequences.js';
+import { config, whatsappConfigured } from '../config.js';
+import { agentReady } from '../ai/agent.js';
+import { handleOutbound } from '../domain/inbound.js';
+import { emitEvent } from '../domain/events.js';
+import { automationRoutes } from './routes-automation.js';
+import { settingsRoutes } from './routes-settings.js';
+
+const subscriberInclude = { labels: { include: { label: true } }, _count: { select: { conversations: true } } } as const;
 
 export async function apiRoutes(app: FastifyInstance) {
-  app.get('/', async () => ({
-    ok: true,
-    service: 'chatsyncs-replica',
-    endpoints: ['/api/health', '/api/account', '/api/subscribers', '/api/labels', '/api/sequences', '/api/whatsapp/webhook'],
-  }));
   app.get('/api/health', async () => ({ ok: true, service: 'chatsyncs-replica' }));
 
   // ---------- Subscribers ----------
-  app.get('/api/subscribers', async () => {
-    const subscribers = await prisma.subscriber.findMany({
-      include: { labels: { include: { label: true } }, _count: { select: { conversations: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 200,
-    });
-    return subscribers;
+  app.get('/api/subscribers', async (request) => {
+    const q = request.query as { q?: string; label?: string; take?: string; skip?: string };
+    const where: any = {};
+    if (q.q) {
+      where.OR = [
+        { phone: { contains: q.q } },
+        { name: { contains: q.q, mode: 'insensitive' } },
+        { email: { contains: q.q, mode: 'insensitive' } },
+      ];
+    }
+    if (q.label) where.labels = { some: { label: { name: q.label } } };
+    const take = Math.min(Number(q.take ?? 100), 500);
+    const [items, total] = await Promise.all([
+      prisma.subscriber.findMany({ where, include: subscriberInclude, orderBy: { createdAt: 'desc' }, take, skip: Number(q.skip ?? 0) }),
+      prisma.subscriber.count({ where }),
+    ]);
+    return { items, total };
   });
 
   app.post('/api/subscribers', async (request, reply) => {
     const body = request.body as { phone?: string; name?: string; email?: string; customFields?: Record<string, unknown> };
     if (!body.phone) return reply.code(400).send({ error: 'phone is required' });
-    const existing = await prisma.subscriber.findUnique({ where: { phone: body.phone } });
-    if (existing) {
-      return reply.code(200).send(existing);
-    }
+    const phone = body.phone.replace(/[^\d]/g, '');
+    const existing = await prisma.subscriber.findUnique({ where: { phone } });
+    if (existing) return reply.code(200).send(existing);
     const subscriber = await prisma.subscriber.create({
-      data: { phone: body.phone, name: body.name, email: body.email, customFields: (body.customFields ?? {}) as any },
-      include: { labels: { include: { label: true } } },
+      data: { phone, name: body.name, email: body.email, customFields: (body.customFields ?? {}) as any, source: 'manual' },
+      include: subscriberInclude,
     });
+    await emitEvent('subscriber.created', { phone, name: body.name });
     return reply.code(201).send(subscriber);
+  });
+
+  // Importación masiva (CSV parseado en el cliente): [{ phone, name?, email?, labels? }]
+  app.post('/api/subscribers/import', async (request, reply) => {
+    const body = request.body as { rows?: Array<{ phone?: string; name?: string; email?: string; labels?: string[] }> };
+    if (!body.rows?.length) return reply.code(400).send({ error: 'rows is required' });
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    for (const row of body.rows.slice(0, 5000)) {
+      const phone = String(row.phone ?? '').replace(/[^\d]/g, '');
+      if (phone.length < 7) {
+        skipped += 1;
+        continue;
+      }
+      const existing = await prisma.subscriber.findUnique({ where: { phone } });
+      const subscriber = await prisma.subscriber.upsert({
+        where: { phone },
+        update: { name: row.name || undefined, email: row.email || undefined },
+        create: { phone, name: row.name || undefined, email: row.email || undefined, source: 'import' },
+      });
+      existing ? (updated += 1) : (created += 1);
+      for (const name of row.labels ?? []) {
+        if (!name) continue;
+        const label = await prisma.label.upsert({ where: { name }, update: {}, create: { name } });
+        await prisma.subscriberLabel.upsert({
+          where: { subscriberId_labelId: { subscriberId: subscriber.id, labelId: label.id } },
+          update: {},
+          create: { subscriberId: subscriber.id, labelId: label.id },
+        });
+      }
+    }
+    return { ok: true, created, updated, skipped };
   });
 
   app.get('/api/subscribers/:phone', async (request, reply) => {
     const { phone } = request.params as { phone: string };
     const subscriber = await prisma.subscriber.findUnique({
       where: { phone },
-      include: { labels: { include: { label: true } }, conversations: { include: { messages: true } }, notes: true },
+      include: {
+        labels: { include: { label: true } },
+        conversations: { include: { messages: { orderBy: { createdAt: 'asc' }, take: 100 } } },
+        notes: { orderBy: { createdAt: 'desc' } },
+        deals: true,
+      },
     });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
     return subscriber;
+  });
+
+  app.patch('/api/subscribers/:phone', async (request, reply) => {
+    const { phone } = request.params as { phone: string };
+    const body = request.body as { name?: string; email?: string; customFields?: Record<string, unknown>; blocked?: boolean; optedOut?: boolean };
+    const current = await prisma.subscriber.findUnique({ where: { phone } });
+    if (!current) return reply.code(404).send({ error: 'subscriber_not_found' });
+    return prisma.subscriber.update({
+      where: { phone },
+      data: {
+        name: body.name,
+        email: body.email,
+        blocked: body.blocked,
+        optedOut: body.optedOut,
+        // Fusiona con los campos existentes en vez de borrarlos.
+        ...(body.customFields ? { customFields: { ...(current.customFields as object), ...body.customFields } as any } : {}),
+      },
+      include: subscriberInclude,
+    });
   });
 
   app.delete('/api/subscribers/:phone', async (request, reply) => {
@@ -53,24 +121,20 @@ export async function apiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.patch('/api/subscribers/:phone', async (request, reply) => {
-    const { phone } = request.params as { phone: string };
-    const body = request.body as { name?: string; email?: string; customFields?: Record<string, unknown> };
-    const subscriber = await prisma.subscriber.update({
-      where: { phone },
-      data: { name: body.name, email: body.email, customFields: (body.customFields ?? {}) as any },
-      include: { labels: { include: { label: true } } },
-    });
-    return subscriber;
-  });
-
   // ---------- Labels ----------
-  app.get('/api/labels', async () => prisma.label.findMany({ include: { _count: { select: { subscribers: true } } } }));
+  app.get('/api/labels', async () => prisma.label.findMany({ include: { _count: { select: { subscribers: true } } }, orderBy: { name: 'asc' } }));
+
   app.post('/api/labels', async (request, reply) => {
     const body = request.body as { name?: string };
     if (!body.name) return reply.code(400).send({ error: 'name is required' });
-    const label = await prisma.label.create({ data: { name: body.name } });
+    const label = await prisma.label.upsert({ where: { name: body.name }, update: {}, create: { name: body.name } });
     return reply.code(201).send(label);
+  });
+
+  app.delete('/api/labels/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    await prisma.label.delete({ where: { id } });
+    return { ok: true };
   });
 
   app.post('/api/subscribers/:phone/labels', async (request, reply) => {
@@ -78,38 +142,53 @@ export async function apiRoutes(app: FastifyInstance) {
     const body = request.body as { labels?: string[] };
     const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
     if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
-    const created: any[] = [];
-    for (const labelName of body.labels ?? []) {
-      const label = await prisma.label.upsert({
-        where: { name: labelName },
+    const created = [];
+    for (const name of body.labels ?? []) {
+      const label = await prisma.label.upsert({ where: { name }, update: {}, create: { name } });
+      await prisma.subscriberLabel.upsert({
+        where: { subscriberId_labelId: { subscriberId: subscriber.id, labelId: label.id } },
         update: {},
-        create: { name: labelName },
+        create: { subscriberId: subscriber.id, labelId: label.id },
       });
       created.push(label);
     }
     return { ok: true, labels: created };
   });
 
-  // ---------- Conversations ----------
-  app.get('/api/conversations', async (request, reply) => {
-    const q = request.query as { phone?: string; status?: string };
+  app.delete('/api/subscribers/:phone/labels/:labelId', async (request, reply) => {
+    const { phone, labelId } = request.params as { phone: string; labelId: string };
+    const subscriber = await prisma.subscriber.findUnique({ where: { phone } });
+    if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
+    await prisma.subscriberLabel.deleteMany({ where: { subscriberId: subscriber.id, labelId } });
+    return { ok: true };
+  });
+
+  // ---------- Conversations (shared inbox) ----------
+  app.get('/api/conversations', async (request) => {
+    const q = request.query as { phone?: string; status?: string; assignedTo?: string; q?: string };
     const where: any = {};
     if (q.phone) where.subscriber = { phone: q.phone };
     if (q.status) where.status = q.status;
-    const conversations = await prisma.conversation.findMany({
+    if (q.assignedTo === 'unassigned') where.assignedTo = null;
+    else if (q.assignedTo) where.assignedTo = q.assignedTo;
+    if (q.q) where.subscriber = { OR: [{ phone: { contains: q.q } }, { name: { contains: q.q, mode: 'insensitive' } }] };
+    return prisma.conversation.findMany({
       where,
-      include: { subscriber: true, messages: { orderBy: { createdAt: 'asc' }, take: 50 } },
+      include: { subscriber: true, messages: { orderBy: { createdAt: 'desc' }, take: 1 } },
       orderBy: { updatedAt: 'desc' },
       take: 100,
     });
-    return conversations;
   });
 
   app.get('/api/conversations/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const conversation = await prisma.conversation.findUnique({
       where: { id },
-      include: { subscriber: true, messages: { orderBy: { createdAt: 'asc' } } },
+      include: {
+        subscriber: { include: { labels: { include: { label: true } } } },
+        messages: { orderBy: { createdAt: 'asc' } },
+        notes: { orderBy: { createdAt: 'desc' } },
+      },
     });
     if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
     return conversation;
@@ -117,19 +196,14 @@ export async function apiRoutes(app: FastifyInstance) {
 
   app.post('/api/conversations/:id/messages', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { direction?: 'inbound' | 'outbound'; body?: string; providerMessageId?: string };
-    const conversation = await prisma.conversation.findUnique({ where: { id }, include: { subscriber: true } });
-    if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
-    const message = await prisma.message.create({
-      data: {
-        conversationId: id,
-        direction: body.direction ?? 'outbound',
-        providerMessageId: body.providerMessageId,
-        body: body.body ?? '',
-      },
-    });
-    await prisma.conversation.update({ where: { id }, data: { updatedAt: new Date() } });
-    return message;
+    const body = request.body as { body?: string };
+    if (!body.body?.trim()) return reply.code(400).send({ error: 'body is required' });
+    try {
+      const result = await handleOutbound({ conversationId: id, body: body.body.trim() });
+      return reply.code(result.ok ? 200 : 502).send(result);
+    } catch (error) {
+      return reply.code(404).send({ error: (error as Error).message });
+    }
   });
 
   app.post('/api/conversations/:id/notes', async (request, reply) => {
@@ -137,113 +211,75 @@ export async function apiRoutes(app: FastifyInstance) {
     const body = request.body as { author?: string; body?: string };
     const conversation = await prisma.conversation.findUnique({ where: { id } });
     if (!conversation) return reply.code(404).send({ error: 'conversation_not_found' });
-    const note = await prisma.subscriberNote.create({
+    return prisma.subscriberNote.create({
       data: { subscriberId: conversation.subscriberId, conversationId: id, author: body.author ?? 'agent', body: body.body ?? '' },
     });
-    return note;
   });
 
   app.patch('/api/conversations/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = request.body as { status?: string; assignedTo?: string };
+    const body = request.body as { status?: string; assignedTo?: string | null };
+    const current = await prisma.conversation.findUnique({ where: { id } });
+    if (!current) return reply.code(404).send({ error: 'conversation_not_found' });
     const conversation = await prisma.conversation.update({
       where: { id },
       data: {
         ...(body.status ? { status: body.status } : {}),
-        ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo } : {}),
+        ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo || null } : {}),
       },
-      include: { subscriber: true, messages: { orderBy: { createdAt: 'asc' } } },
+      include: { subscriber: true },
     });
+    await emitEvent('conversation.updated', { id, status: conversation.status, assignedTo: conversation.assignedTo });
     return conversation;
   });
 
-  // ---------- Broadcasts ----------
-  app.get('/api/broadcasts', async () => prisma.broadcast.findMany({ orderBy: { createdAt: 'desc' } }));
-  app.post('/api/broadcasts', async (request, reply) => {
-    const body = request.body as { name?: string; audience?: any; contentType?: string; content?: string };
-    if (!body.name) return reply.code(400).send({ error: 'name is required' });
-    const broadcast = await prisma.broadcast.create({
-      data: {
-        name: body.name,
-        audience: body.audience ?? {},
-        contentType: body.contentType ?? 'text',
-        content: body.content ?? '',
-        status: 'draft',
-      },
-    });
-    return reply.code(201).send(broadcast);
-  });
-
-  app.post('/api/broadcasts/:id/send', async (request, reply) => {
-    const { id } = request.params as { id: string };
-    try {
-      const result = await sendBroadcast({ broadcastId: id });
-      return result;
-    } catch (error) {
-      return reply.code(502).send({ error: 'broadcast_send_failed', message: (error as Error).message });
-    }
-  });
-
-  // ---------- Sequences ----------
-  app.get('/api/sequences', async () => prisma.sequence.findMany({ include: { _count: { select: { enrollments: true } } } }));
-  app.post('/api/sequences', async (request, reply) => {
-    const body = request.body as { name?: string; steps?: any[] };
-    if (!body.name) return reply.code(400).send({ error: 'name is required' });
-    const sequence = await prisma.sequence.create({
-      data: { name: body.name, steps: { create: (body.steps ?? []).map((s: any, i: number) => ({ action: s.action, params: s.params ?? {}, delayDays: s.delayDays ?? 0, order: s.order ?? i })) } },
-      include: { steps: true },
-    });
-    return reply.code(201).send(sequence);
-  });
-
-  app.post('/api/sequences/:id/trigger', async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const body = request.body as { phone?: string };
-    if (!body.phone) return reply.code(400).send({ error: 'phone is required' });
-    try {
-      const result = await triggerBotFlowForSubscriber({ phone: body.phone, flowId: id });
-      return result;
-    } catch (error) {
-      return reply.code(404).send({ error: 'bot_flow_not_found', message: (error as Error).message });
-    }
-  });
-
-  // ---------- Orders ----------
-  app.get('/api/orders', async (request, reply) => {
-    const q = request.query as { phone?: string };
-    const where = q.phone ? { subscriber: { phone: q.phone } } : {};
-    const orders = await prisma.order.findMany({
-      where,
-      include: { subscriber: true },
-      orderBy: { createdAt: 'desc' },
-      take: 200,
-    });
-    return orders;
-  });
-
-  app.patch('/api/orders/:id', async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const body = request.body as { status?: string };
-    const order = await prisma.order.update({ where: { id }, data: { status: body.status ?? 'pending' } });
-    return order;
-  });
-
   // ---------- CRM deals ----------
-  app.get('/api/crm/deals', async () => prisma.crmDeal.findMany({ include: { subscriber: true } }));
-  app.patch('/api/crm/deals/:id', async (request, reply) => {
+  app.get('/api/crm/deals', async () => prisma.crmDeal.findMany({ include: { subscriber: true }, orderBy: { updatedAt: 'desc' } }));
+
+  app.post('/api/crm/deals', async (request, reply) => {
+    const body = request.body as { phone?: string; stage?: string; value?: number; owner?: string };
+    if (!body.phone) return reply.code(400).send({ error: 'phone is required' });
+    const subscriber = await prisma.subscriber.findUnique({ where: { phone: body.phone } });
+    if (!subscriber) return reply.code(404).send({ error: 'subscriber_not_found' });
+    const deal = await prisma.crmDeal.create({
+      data: { subscriberId: subscriber.id, stage: body.stage ?? 'new', value: Math.round(body.value ?? 0), owner: body.owner },
+      include: { subscriber: true },
+    });
+    return reply.code(201).send(deal);
+  });
+
+  app.patch('/api/crm/deals/:id', async (request) => {
     const { id } = request.params as { id: string };
     const body = request.body as { stage?: string; value?: number; owner?: string };
-    const deal = await prisma.crmDeal.update({ where: { id }, data: body });
-    return deal;
+    return prisma.crmDeal.update({
+      where: { id },
+      data: { stage: body.stage, owner: body.owner, ...(body.value !== undefined ? { value: Math.round(body.value) } : {}) },
+      include: { subscriber: true },
+    });
   });
 
-  // ---------- Account ----------
-  app.get('/api/account', async () => ({
-    ok: true,
-    whatsapp: {
-      businessAccountId: 'set_from_env',
-      phoneNumberId: 'set_from_env',
-      webhookConfigured: true,
-    },
-  }));
+  app.delete('/api/crm/deals/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    await prisma.crmDeal.delete({ where: { id } });
+    return { ok: true };
+  });
+
+  // ---------- Account / estado de conexión ----------
+  app.get('/api/account', async () => {
+    const [subscribers, conversations] = await Promise.all([prisma.subscriber.count(), prisma.conversation.count()]);
+    return {
+      ok: true,
+      whatsapp: {
+        configured: whatsappConfigured(),
+        phoneNumberId: config.whatsapp.phoneNumberId || null,
+        businessAccountId: config.whatsapp.businessAccountId || null,
+        signatureValidation: Boolean(config.whatsapp.appSecret),
+      },
+      ai: { ready: agentReady(), model: process.env.AI_MODEL ?? 'openai/gpt-4o-mini' },
+      counts: { subscribers, conversations },
+    };
+  });
+
+  await app.register(automationRoutes);
+  await app.register(settingsRoutes);
 }

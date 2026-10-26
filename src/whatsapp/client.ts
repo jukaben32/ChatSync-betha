@@ -86,6 +86,46 @@ export async function sendWhatsAppTemplate(params: {
   return { providerMessageId };
 }
 
+export interface MetaTemplate {
+  id: string;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  components?: Array<{ type: string; text?: string }>;
+}
+
+/** Lista las plantillas de la cuenta de WhatsApp Business (WABA). */
+export async function listMetaTemplates(): Promise<MetaTemplate[]> {
+  const url = `${config.whatsapp.baseUrl}/${config.whatsapp.businessAccountId}/message_templates?limit=200`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${config.whatsapp.accessToken}` } });
+  if (!res.ok) throw new Error(`Meta templates list failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { data?: MetaTemplate[] }).data ?? [];
+}
+
+/** Envía una plantilla de texto (BODY) a revisión de Meta. */
+export async function createMetaTemplate(params: {
+  name: string;
+  language: string;
+  category: string;
+  body: string;
+}): Promise<{ id: string; status: string }> {
+  const url = `${config.whatsapp.baseUrl}/${config.whatsapp.businessAccountId}/message_templates`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.whatsapp.accessToken}` },
+    body: JSON.stringify({
+      name: params.name,
+      language: params.language,
+      category: params.category,
+      components: [{ type: 'BODY', text: params.body }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Meta template create failed: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { id?: string; status?: string };
+  return { id: data.id ?? '', status: (data.status ?? 'PENDING').toLowerCase() };
+}
+
 /**
  * Consulta estado de entrega/lectura vía Graph API.
  */

@@ -7,3 +7,6 @@ coverage/
 .DS_Store
 
 .vercel
+
+# build del panel (frontend -> public)
+public/
