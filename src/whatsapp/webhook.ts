@@ -59,7 +59,9 @@ function messageText(msg: WaMessage): string {
 }
 
 function validSignature(rawBody: Buffer | undefined, header: string | undefined) {
-  if (!config.whatsapp.appSecret) return true; // sin app secret no se puede validar
+  // Sin app secret no se puede validar la firma: se rechaza (cerrado por defecto).
+  // ALLOW_UNSIGNED_WEBHOOKS=true solo para pruebas locales.
+  if (!config.whatsapp.appSecret) return process.env.ALLOW_UNSIGNED_WEBHOOKS === 'true';
   if (!rawBody || !header?.startsWith('sha256=')) return false;
   const expected = createHmac('sha256', config.whatsapp.appSecret).update(rawBody).digest('hex');
   const received = header.slice(7);
