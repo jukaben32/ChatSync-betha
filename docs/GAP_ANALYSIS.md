@@ -116,7 +116,7 @@ Leyenda: ✅ hecho · ⚠️ parcial · ❌ pendiente · ⛔ excluido
 | Acciones automáticas: etiquetas, campos, secuencias, flujos, traspaso, resolver, bloquear, no responder | idem | ✅ | solo sobre el contacto actual |
 | Modo «todo» vs «solo si no hay flujo» | idem | ✅ | |
 | Espera, temas restringidos, escalado por sentimiento | idem, changelog | ✅ | |
-| Entiende imágenes y notas de voz | idem | ❌ | exige descargar medios de Meta y un modelo con visión/transcripción |
+| Entiende imágenes y notas de voz | idem | ✅ | `src/ai/media.ts`: descarga de Meta, transcripción (`openai/whisper-1`) y visión; probado en producción con `/api/simulate/inbound` (la descarga real de Meta espera credenciales) |
 | Varios agentes con configuración propia | app: AI → Agents | ❌ | |
 
 ## API, webhooks y MCP
@@ -160,7 +160,7 @@ reservas de soporte por Google Meet y *Chatty AI* (servicios de la empresa).
 ## Siguiente trabajo recomendado
 
 1. **Conectar un número de WhatsApp de prueba**: nada de lo que depende de Meta se ha probado contra Meta real.
-2. Entender imágenes y notas de voz (descarga de medios + modelo con visión/transcripción).
+2. ~~Entender imágenes y notas de voz~~ (hecho; variables opcionales `AI_TRANSCRIBE_MODEL`, `AI_MEDIA_MODEL`).
 3. Embeddings para el conocimiento si la búsqueda léxica se queda corta.
 4. 2FA, sesiones activas con cierre remoto, alertas de acceso.
 5. Quick Actions / Outbound Actions y varios agentes de IA.

@@ -15,6 +15,7 @@ Sin pagos, planes ni facturación. Producción: https://chatsyncs-replica.vercel
 | Formularios dentro del chat (validación, envíos, exportación) | ✅ |
 | Citas: huecos por zona horaria, sin dobles reservas, recordatorios | ✅ |
 | Broadcasts: segmentación, imagen, botones, programación, entrega/lectura/clics | ✅ |
+| Notas de voz transcritas e imágenes descritas por IA (el texto alimenta flujos, palabras clave y agente) | ✅ |
 | Webhook Workflows entrantes; webhooks salientes firmados | ✅ |
 | Plantillas de WhatsApp (crear, enviar a Meta, sincronizar) | ✅ |
 | Agente IA: conocimiento por texto/web/Sheets/PDF con recuperación por fragmentos, acciones sobre el contacto, traspaso a humano, seguimientos inteligentes | ✅ requiere `AI_API_KEY` |
