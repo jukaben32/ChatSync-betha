@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { api } from '../api'
-import { Badge, Card, ErrorNote, Page, useAsync } from '../ui'
+import { Badge, Card, Icon, ErrorNote, Page, useAsync } from '../ui'
 
 interface Overview {
   subscribers: number
@@ -29,11 +29,11 @@ interface Account {
 }
 
 const QUICK: { to: string; icon: string; title: string; hint: string }[] = [
-  { to: '/broadcasts', icon: '📣', title: 'Nuevo broadcast', hint: 'Enviar a tu audiencia' },
-  { to: '/inbox', icon: '💬', title: 'Abrir bandeja', hint: 'Ver conversaciones' },
-  { to: '/automations', icon: '⚡', title: 'Crear flujo', hint: 'Construir automatización' },
-  { to: '/ai', icon: '✦', title: 'Entrenar IA', hint: 'Mejorar sus respuestas' },
-  { to: '/settings', icon: '🔌', title: 'Conectar canal', hint: 'WhatsApp Cloud API' },
+  { to: '/broadcasts', icon: 'megaphone', title: 'Nuevo broadcast', hint: 'Enviar a tu audiencia' },
+  { to: '/inbox', icon: 'inbox', title: 'Abrir bandeja', hint: 'Ver conversaciones' },
+  { to: '/automations', icon: 'bolt', title: 'Crear flujo', hint: 'Construir automatización' },
+  { to: '/ai', icon: 'sparkle', title: 'Entrenar IA', hint: 'Mejorar sus respuestas' },
+  { to: '/settings', icon: 'plug', title: 'Conectar canal', hint: 'WhatsApp Cloud API' },
 ]
 
 function Stat({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
@@ -71,8 +71,8 @@ export default function Dashboard() {
       )}
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', marginBottom: 16 }}>
         {QUICK.map((qa) => (
-          <Link key={qa.to} to={qa.to} className="card" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <div style={{ fontSize: 20 }}>{qa.icon}</div>
+          <Link key={qa.to} to={qa.to} className="card quick" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <Icon name={qa.icon} />
             <strong>{qa.title}</strong>
             <div className="muted">{qa.hint}</div>
           </Link>

@@ -103,6 +103,31 @@ export function Avatar({ text }: { text: string }) {
   return <span className="avatar">{text}</span>
 }
 
+const ICONS: Record<string, ReactNode> = {
+  panel: <><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>,
+  inbox: <path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-5.4A8 8 0 1 1 21 12Z" />,
+  users: <><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20c.5-3.5 3.200-5.500 6.500-5.500s6 2 6.500 5.500" /><path d="M16 4.600a3.500 3.500 0 0 1 0 6.800M18 14.800c1.800.7 3 2.500 3.500 5.200" /></>,
+  crm: <><path d="M3 4h18l-7 9v6l-4 2v-8L3 4Z" /></>,
+  calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 10h18M8 3v4M16 3v4" /></>,
+  megaphone: <><path d="M3 11v3a1 1 0 0 0 1 1h3l8 4V6L7 10H4a1 1 0 0 0-1 1Z" /><path d="M19 9a4 4 0 0 1 0 6" /></>,
+  bolt: <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />,
+  form: <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3" /></>,
+  webhook: <><circle cx="6" cy="17" r="2.500" /><circle cx="18" cy="17" r="2.500" /><circle cx="12" cy="6" r="2.500" /><path d="M12 8.500 7 15M12 8.500l5 6.500M8.500 17h7" /></>,
+  file: <><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" /><path d="M14 3v5h5" /></>,
+  sparkle: <path d="M12 3l1.900 5.100L19 10l-5.100 1.900L12 17l-1.900-5.100L5 10l5.100-1.900L12 3ZM19 17l.7 1.800L21.500 19.500l-1.800.7L19 22l-.7-1.800-1.800-.7 1.800-.7L19 17Z" />,
+  plug: <><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7ZM12 17v5" /></>,
+  team: <><circle cx="12" cy="8" r="4" /><path d="M4 21c.6-4 3.700-6 8-6s7.400 2 8 6" /></>,
+  gear: <><circle cx="12" cy="12" r="3" /><path d="M19.400 15a1.700 1.700 0 0 0 .3 1.800l.1.1a2 2 0 1 1-2.800 2.800l-.1-.1a1.700 1.700 0 0 0-1.800-.3 1.700 1.700 0 0 0-1 1.500V21a2 2 0 1 1-4 0v-.1a1.700 1.700 0 0 0-1.100-1.500 1.700 1.700 0 0 0-1.800.3l-.1.1a2 2 0 1 1-2.800-2.800l.1-.1a1.700 1.700 0 0 0 .3-1.800 1.700 1.700 0 0 0-1.500-1H3a2 2 0 1 1 0-4h.1a1.700 1.700 0 0 0 1.500-1.100 1.700 1.700 0 0 0-.3-1.800l-.1-.1a2 2 0 1 1 2.800-2.800l.1.100a1.700 1.700 0 0 0 1.800.3h0a1.700 1.700 0 0 0 1-1.500V3a2 2 0 1 1 4 0v.1a1.700 1.700 0 0 0 1 1.500h0a1.700 1.700 0 0 0 1.800-.3l.1-.1a2 2 0 1 1 2.800 2.800l-.1.100a1.700 1.700 0 0 0-.3 1.800v0a1.700 1.700 0 0 0 1.500 1H21a2 2 0 1 1 0 4h-.1a1.700 1.700 0 0 0-1.500 1Z" /></>,
+}
+
+export function Icon({ name, className = 'ico' }: { name: string; className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      {ICONS[name] ?? ICONS.sparkle}
+    </svg>
+  )
+}
+
 /** Símbolo de marca de Betha IA (el mismo de betha-ai.vercel.app). */
 export function BrandMark({ className = 'brandmark' }: { className?: string }) {
   return (

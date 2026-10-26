@@ -4,7 +4,7 @@ import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-do
 import { ApiError, api, getKey, setKey } from './api'
 import { MeContext } from './auth'
 import type { Me } from './auth'
-import { Brand, ErrorNote, ThemeSwitch } from './ui'
+import { Brand, ErrorNote, Icon, ThemeSwitch } from './ui'
 import Dashboard from './pages/Dashboard'
 import Inbox from './pages/Inbox'
 import Contacts from './pages/Contacts'
@@ -32,30 +32,30 @@ const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: 'Conversaciones',
     items: [
-      { to: '/', icon: '▦', label: 'Panel' },
-      { to: '/inbox', icon: '💬', label: 'Bandeja', agent: true },
-      { to: '/contacts', icon: '👥', label: 'Contactos', agent: true },
-      { to: '/crm', icon: '◈', label: 'CRM', agent: true },
-      { to: '/appointments', icon: '📅', label: 'Citas', agent: true },
+      { to: '/', icon: 'panel', label: 'Panel' },
+      { to: '/inbox', icon: 'inbox', label: 'Bandeja', agent: true },
+      { to: '/contacts', icon: 'users', label: 'Contactos', agent: true },
+      { to: '/crm', icon: 'crm', label: 'CRM', agent: true },
+      { to: '/appointments', icon: 'calendar', label: 'Citas', agent: true },
     ],
   },
   {
     group: 'Automatización',
     items: [
-      { to: '/broadcasts', icon: '📣', label: 'Broadcasts' },
-      { to: '/automations', icon: '⚡', label: 'Secuencias y flujos' },
-      { to: '/forms', icon: '📋', label: 'Formularios' },
-      { to: '/workflows', icon: '↯', label: 'Webhook Workflows' },
-      { to: '/templates', icon: '📄', label: 'Plantillas' },
-      { to: '/ai', icon: '✦', label: 'Agente IA' },
+      { to: '/broadcasts', icon: 'megaphone', label: 'Broadcasts' },
+      { to: '/automations', icon: 'bolt', label: 'Secuencias y flujos' },
+      { to: '/forms', icon: 'form', label: 'Formularios' },
+      { to: '/workflows', icon: 'webhook', label: 'Webhook Workflows' },
+      { to: '/templates', icon: 'file', label: 'Plantillas' },
+      { to: '/ai', icon: 'sparkle', label: 'Agente IA' },
     ],
   },
   {
     group: 'Configuración',
     items: [
-      { to: '/integrations', icon: '🔌', label: 'Webhooks y API' },
-      { to: '/team', icon: '🧑‍💼', label: 'Equipo' },
-      { to: '/settings', icon: '⚙', label: 'Ajustes' },
+      { to: '/integrations', icon: 'plug', label: 'Webhooks y API' },
+      { to: '/team', icon: 'team', label: 'Equipo' },
+      { to: '/settings', icon: 'gear', label: 'Ajustes' },
     ],
   },
 ]
@@ -138,7 +138,7 @@ function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
             <div className="nav-group">{g.group}</div>
             {g.items.map((i) => (
               <NavLink key={i.to} to={i.to} end={i.to === '/'} className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                <span>{i.icon}</span>
+                <Icon name={i.icon} />
                 <span>{i.label}</span>
               </NavLink>
             ))}
