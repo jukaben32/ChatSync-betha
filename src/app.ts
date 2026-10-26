@@ -14,7 +14,7 @@ export const app = Fastify({
 
 app.register(cors, { origin: true });
 app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
-app.register(apiRoutes, { prefix: '/api' });
+app.register(apiRoutes);
 
 export async function buildApp() {
   return app;
