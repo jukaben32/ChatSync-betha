@@ -19,6 +19,7 @@ model Subscriber {
   notes          SubscriberNote[]
   sequences     SubscriberSequence[]
   orders         Order[]
+  deals          CrmDeal[]
   createdAt      DateTime @default(now()) @db.Timestamptz
   updatedAt      DateTime @updatedAt @db.Timestamptz
 
@@ -77,6 +78,7 @@ model Message {
 model SubscriberNote {
   id            String      @id @default(uuid()) @db.Uuid
   subscriberId String      @db.Uuid
+  subscriber    Subscriber  @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
   conversationId String?   @db.Uuid
   conversation  Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   author        String      @db.VarChar(64)
@@ -103,8 +105,9 @@ model SequenceStep {
 }
 
 model SubscriberSequence {
-  subscriberId String
-  sequenceId   String
+  subscriberId String   @db.Uuid
+  subscriber   Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  sequenceId   String   @db.Uuid
   sequence     Sequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
   enrolledAt   DateTime @default(now()) @db.Timestamptz
   @@id([subscriberId, sequenceId])
