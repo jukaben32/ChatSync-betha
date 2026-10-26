@@ -24,6 +24,11 @@ app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, bo
   }
 });
 
+// Formularios (application/x-www-form-urlencoded): lo usa la API v1 compatible con ChatSyncs
+app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body: string, done) => {
+  done(null, Object.fromEntries(new URLSearchParams(body)));
+});
+
 app.register(cors, { origin: true });
 app.addHook('onRequest', authHook);
 app.addHook('onResponse', usageLogHook);

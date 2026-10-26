@@ -11,6 +11,7 @@ import { settingsRoutes } from './routes-settings.js';
 import { hookRoutes } from './routes-hooks.js';
 import { aiRoutes } from './routes-ai.js';
 import { mcpRoutes } from './routes-mcp.js';
+import { v1Routes } from './routes-v1.js';
 
 const subscriberInclude = { labels: { include: { label: true } }, _count: { select: { conversations: true } } } as const;
 
@@ -327,5 +328,6 @@ export async function apiRoutes(app: FastifyInstance) {
   await app.register(hookRoutes);
   await app.register(aiRoutes);
   await app.register(mcpRoutes);
+  await app.register(v1Routes);
   await app.register(settingsRoutes);
 }

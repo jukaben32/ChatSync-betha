@@ -2,7 +2,7 @@ import { prisma } from '../prisma.js';
 import { whatsappConfigured } from '../config.js';
 import { sendWhatsAppText, sendWhatsAppTemplate } from '../whatsapp/client.js';
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppMedia } from '../whatsapp/rich.js';
-import type { ListRow, MediaKind, ReplyButton } from '../whatsapp/rich.js';
+import type { ButtonsHeader, ListRow, MediaKind, ReplyButton } from '../whatsapp/rich.js';
 import { randomUUID } from 'node:crypto';
 import { emitEvent } from './events.js';
 import { getSetting } from './settings.js';
@@ -44,7 +44,7 @@ export function renderVars(text: string, subscriber: { name: string | null; phon
 export type OutgoingContent =
   | { type: 'text'; body: string }
   | { type: 'template'; name: string; language?: string; variables?: string[] }
-  | { type: 'buttons'; body: string; buttons: ReplyButton[]; footer?: string }
+  | { type: 'buttons'; body: string; buttons: ReplyButton[]; footer?: string; header?: ButtonsHeader }
   | { type: 'list'; body: string; buttonText: string; rows: ListRow[] }
   | { type: 'media'; kind: MediaKind; url: string; caption?: string; filename?: string };
 
@@ -107,7 +107,7 @@ export async function sendMessage(params: { phone: string; content: OutgoingCont
         content.type === 'template'
           ? await sendWhatsAppTemplate({ to, templateName: content.name, languageCode: content.language, bodyUrlVariables: content.variables })
           : content.type === 'buttons'
-            ? await sendWhatsAppButtons({ to, body: content.body, buttons: content.buttons, footer: content.footer })
+            ? await sendWhatsAppButtons({ to, body: content.body, buttons: content.buttons, footer: content.footer, header: content.header })
             : content.type === 'list'
               ? await sendWhatsAppList({ to, body: content.body, buttonText: content.buttonText, rows: content.rows })
               : content.type === 'media'

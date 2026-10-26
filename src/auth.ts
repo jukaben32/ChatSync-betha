@@ -4,7 +4,8 @@ import { config } from './config.js';
 import { prisma } from './prisma.js';
 
 // Rutas públicas: health, webhook de Meta (verify token + firma), cron (CRON_SECRET) y receptores de Webhook Workflow (token en la URL).
-const PUBLIC_PREFIXES = ['/api/health', '/api/whatsapp/webhook', '/api/cron/', '/api/hooks/'];
+// /api/v1/ se autentica en su propio plugin (el `apiToken` puede ir en el cuerpo, que aún no está leído en onRequest).
+const PUBLIC_PREFIXES = ['/api/health', '/api/whatsapp/webhook', '/api/cron/', '/api/hooks/', '/api/v1/'];
 
 // Solo la clave de administrador (no las API keys) puede tocar estas rutas.
 const ADMIN_ONLY_PREFIXES = ['/api/api-keys', '/api/settings', '/api/api-logs', '/api/simulate'];
@@ -42,6 +43,22 @@ declare module 'fastify' {
   }
 }
 
+export type AuthResult = { ok: true; keyName?: string } | { ok: false; status: number; error: string; required?: Scope };
+
+/** Valida una clave: ADMIN_API_KEY (acceso total) o una API key activa con el alcance necesario. */
+export async function authenticate(key: string, method: string, path: string): Promise<AuthResult> {
+  if (!config.adminApiKey) return { ok: false, status: 503, error: 'auth_not_configured' };
+  if (!key) return { ok: false, status: 401, error: 'unauthorized' };
+  if (safeEqual(key, config.adminApiKey)) return { ok: true };
+  if (ADMIN_ONLY_PREFIXES.some((p) => path.startsWith(p))) return { ok: false, status: 403, error: 'admin_key_required' };
+  const record = await prisma.apiKey.findUnique({ where: { hash: sha256(key) } });
+  if (!record || !record.active) return { ok: false, status: 401, error: 'unauthorized' };
+  const required = requiredScope(method, path);
+  if (record.scopes.length && !record.scopes.includes(required)) return { ok: false, status: 403, error: 'insufficient_scope', required };
+  await prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } });
+  return { ok: true, keyName: record.name };
+}
+
 /** Hook onRequest: exige ADMIN_API_KEY o una API key activa (con alcance) en todo /api/*. */
 export async function authHook(request: FastifyRequest, reply: FastifyReply) {
   const path = request.url.split('?')[0];
@@ -49,22 +66,13 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply) {
   if (!path.startsWith('/api')) return;
   if (PUBLIC_PREFIXES.some((p) => path === p || path.startsWith(p))) return;
 
-  if (!config.adminApiKey) {
-    return reply.code(503).send({ error: 'auth_not_configured', message: 'Define ADMIN_API_KEY en el entorno.' });
+  const result = await authenticate(extractKey(request), request.method, path);
+  if (result.ok) {
+    request.apiKeyName = result.keyName;
+    return;
   }
-  const key = extractKey(request);
-  if (!key) return reply.code(401).send({ error: 'unauthorized' });
-  if (safeEqual(key, config.adminApiKey)) return;
-
-  if (ADMIN_ONLY_PREFIXES.some((p) => path.startsWith(p))) return reply.code(403).send({ error: 'admin_key_required' });
-
-  const record = await prisma.apiKey.findUnique({ where: { hash: sha256(key) } });
-  if (!record || !record.active) return reply.code(401).send({ error: 'unauthorized' });
-  if (record.scopes.length && !record.scopes.includes(requiredScope(request.method, path))) {
-    return reply.code(403).send({ error: 'insufficient_scope', required: requiredScope(request.method, path) });
-  }
-  request.apiKeyName = record.name;
-  await prisma.apiKey.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } });
+  if (result.error === 'auth_not_configured') return reply.code(503).send({ error: result.error, message: 'Define ADMIN_API_KEY en el entorno.' });
+  return reply.code(result.status).send({ error: result.error, ...(result.required ? { required: result.required } : {}) });
 }
 
 /** Hook onResponse: registro de uso de las API keys (no de la clave de administrador, para no inundar el log con el panel). */

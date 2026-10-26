@@ -27,8 +27,15 @@ async function post(payload: Record<string, unknown>): Promise<{ providerMessage
   return { providerMessageId };
 }
 
-/** Mensaje con hasta 3 botones de respuesta rápida. */
-export function sendWhatsAppButtons(params: { to: string; body: string; buttons: ReplyButton[]; footer?: string }) {
+export interface ButtonsHeader {
+  type: 'text' | 'image' | 'video' | 'document';
+  text?: string;
+  url?: string;
+  filename?: string;
+}
+
+/** Mensaje con hasta 3 botones de respuesta rápida (y cabecera de texto o medio opcional). */
+export function sendWhatsAppButtons(params: { to: string; body: string; buttons: ReplyButton[]; footer?: string; header?: ButtonsHeader }) {
   const buttons = params.buttons.slice(0, 3);
   if (!buttons.length) throw new Error('buttons_required');
   return post({
@@ -36,6 +43,14 @@ export function sendWhatsAppButtons(params: { to: string; body: string; buttons:
     type: 'interactive',
     interactive: {
       type: 'button',
+      ...(params.header
+        ? {
+            header:
+              params.header.type === 'text'
+                ? { type: 'text', text: (params.header.text ?? '').slice(0, 60) }
+                : { type: params.header.type, [params.header.type]: { link: params.header.url, ...(params.header.type === 'document' && params.header.filename ? { filename: params.header.filename } : {}) } },
+          }
+        : {}),
       body: { text: params.body.slice(0, 1024) },
       ...(params.footer ? { footer: { text: params.footer.slice(0, 60) } } : {}),
       action: { buttons: buttons.map((b) => ({ type: 'reply', reply: { id: b.id.slice(0, 256), title: b.title.slice(0, 20) } })) },

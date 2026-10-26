@@ -16,3 +16,4 @@ docs/rea-captures/*.json
 docs/rea-captures/pages/
 docs/rea-captures/condensed/
 !docs/rea-captures/public-scenario.json
+docs/rea-captures/app/

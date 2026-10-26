@@ -217,6 +217,72 @@ try {
   const bad = await callTool('get_subscriber', { phone: '000' });
   check('herramienta con error no rompe el protocolo', bad.status === 200);
 
+  console.log('\n12) API v1 compatible con ChatSyncs');
+  const P6 = `1555${tag}8`;
+  created.phones.push(P6);
+  // POST con formulario (como curl -d), GET con apiToken en la URL, o JSON
+  const v1 = async (path, params = {}, { method = 'POST', token = KEY, as = 'form' } = {}) => {
+    const all = { apiToken: token, ...params };
+    let url = `${BASE}/api/v1/${path}`;
+    const init = { method };
+    if (method === 'GET') url += `?${new URLSearchParams(all)}`;
+    else if (as === 'json') {
+      init.headers = { 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(all);
+    } else {
+      init.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      init.body = new URLSearchParams(all).toString();
+    }
+    const res = await fetch(url, init);
+    return { http: res.status, ...(await res.json().catch(() => ({}))) };
+  };
+  check('v1 sin apiToken → 401 con status 0', await v1('label/list', {}, { token: '' }).then((r) => r.http === 401 && r.status === '0'));
+  const created6 = await v1('whatsapp/subscriber/create', { phoneNumberID: '1', name: 'Ana API', phoneNumber: P6 });
+  check('v1 crea suscriptor (formulario)', created6.status === '1' && created6.message?.phone_number === P6, JSON.stringify(created6));
+  check('v1 crear duplicado → status 0', (await v1('whatsapp/subscriber/create', { name: 'x', phoneNumber: P6 })).status === '0');
+  const got = await v1('whatsapp/subscriber/get', { phone_number_id: '1', phone_number: P6 }, { method: 'GET' });
+  check('v1 obtiene suscriptor (GET + apiToken en URL)', got.status === '1' && got.message?.first_name === 'Ana', JSON.stringify(got));
+  const lab = await v1('label/create', { label_name: `v1-${tag}` });
+  created.labels.push(`v1-${tag}`);
+  check('v1 crea etiqueta', lab.status === '1' && Boolean(lab.message?.id));
+  await v1('whatsapp/subscriber/chat/assign-labels', { phone_number_id: '1', phone_number: P6, label_ids: lab.message.id });
+  const afterLabel = await v1('whatsapp/subscriber/get', { phone_number_id: '1', phone_number: P6 });
+  check('v1 asigna etiqueta por id', afterLabel.message?.label_ids?.includes(lab.message.id), JSON.stringify(afterLabel.message?.label_ids));
+  await v1('whatsapp/subscriber/chat/remove-labels', { phone_number_id: '1', phone_number: P6, label_ids: JSON.stringify([lab.message.id]) });
+  check('v1 quita etiqueta (lista JSON)', (await v1('whatsapp/subscriber/get', { phone_number_id: '1', phone_number: P6 })).message?.label_ids?.length === 0);
+  await v1('whatsapp/subscriber/chat/assign-custom-fields', { phone_number_id: '1', phone_number: P6, custom_fields: JSON.stringify([{ name: 'ciudad', value: 'Santiago' }]) });
+  check('v1 asigna campos personalizados', (await v1('whatsapp/subscriber/get', { phone_number_id: '1', phone_number: P6 })).message?.custom_fields?.ciudad === 'Santiago');
+  const noWindow = await v1('whatsapp/send', { phone_number_id: '1', phone_number: P6, message: 'hola' });
+  check('v1 send fuera de la ventana de 24 h → status 0', noWindow.status === '0' && /24h/.test(noWindow.message), JSON.stringify(noWindow));
+  await sim(P6, 'hola');
+  const sentV1 = await v1('whatsapp/send', { phone_number_id: '1', phone_number: P6, message: 'Hola desde la API v1' });
+  check('v1 send dentro de la ventana → wa_message_id', sentV1.status === '1' && Boolean(sentV1.wa_message_id), JSON.stringify(sentV1));
+  const st = await v1('whatsapp/get/message-status', { wa_message_id: sentV1.wa_message_id });
+  check('v1 estado del mensaje', st.status === '1' && st.message?.status === 'sent', JSON.stringify(st));
+  const btns = await v1('whatsapp/send/interactive-buttons', { phone_number_id: '1', phone_number: P6, message: 'Elige', button_header_text: 'Menú', buttons: JSON.stringify(['Sí', { id: 'no', title: 'No' }]) });
+  check('v1 botones interactivos con cabecera', btns.status === '1', JSON.stringify(btns));
+  check('v1 botones: título largo → status 0', (await v1('whatsapp/send/interactive-buttons', { phone_number: P6, message: 'x', buttons: JSON.stringify(['a'.repeat(30)]) })).status === '0');
+  const file = await v1('whatsapp/send/file', { phone_number_id: '1', phone_number: P6, media_url: 'https://example.com/foto.jpg', media_caption_text: 'Foto' });
+  check('v1 send/file infiere el tipo por extensión', file.status === '1', JSON.stringify(file));
+  check('v1 send/file documento sin media_name → status 0', (await v1('whatsapp/send/file', { phone_number: P6, media_url: 'https://example.com/a.pdf' })).status === '0');
+  await v1('whatsapp/subscriber/chat/add-notes', { phone_number_id: '1', phone_number: P6, note_text: 'Nota v1' });
+  const notes = await v1('whatsapp/subscriber/chat/get-notes', { phone_number_id: '1', phone_number: P6 });
+  check('v1 notas: añadir y listar', notes.message?.some((n) => n.note_text === 'Nota v1'), JSON.stringify(notes));
+  await v1('whatsapp/subscriber/crm/update', { phone_number_id: '1', phone_number: P6, stage_id: 'qualified', value: '500', owner_user_id: 'Ana', title: 'Oportunidad v1' });
+  const crm = await v1('whatsapp/subscriber/crm/get', { phone_number_id: '1', phone_number: P6 });
+  check('v1 CRM: actualizar y leer', crm.message?.stage_id === 'qualified' && crm.message?.value === 500 && crm.message?.title === 'Oportunidad v1', JSON.stringify(crm));
+  const marked = await v1('whatsapp/subscriber/chat/mark-conversation', { phone_number_id: '1', phone_number: P6, status: 'resolved' });
+  check('v1 marcar conversación resuelta', marked.status === '1' && (await call(`/api/conversations?phone=${P6}`)).data[0].status === 'solved');
+  const convo = await v1('whatsapp/get/conversation', { phone_number_id: '1', phone_number: P6, limit: '10' });
+  check('v1 historial de conversación', convo.status === '1' && convo.message.some((m) => m.direction === 'out'));
+  const readKey = (await call('/api/api-keys', { body: { name: `v1-read-${tag}`, scopes: ['read'] } })).data;
+  created.keys.push(readKey.id);
+  check('v1 clave solo-lectura puede listar', (await v1('whatsapp/subscriber/list', { phone_number_id: '1', limit: '5' }, { token: readKey.key, method: 'GET' })).status === '1');
+  const denied = await v1('whatsapp/send', { phone_number: P6, message: 'x' }, { token: readKey.key });
+  check('v1 clave solo-lectura no puede enviar (403)', denied.http === 403, JSON.stringify(denied));
+  const jsonBody = await v1('whatsapp/subscriber/delete', { phone_number_id: '1', phone_number: P6 }, { as: 'json' });
+  check('v1 elimina suscriptor (cuerpo JSON)', jsonBody.status === '1');
+
   console.log('\n10) Analítica y ajustes');
   const an = (await call('/api/analytics/overview')).data;
   check('analítica con orígenes y mensajes', Array.isArray(an.sources) && an.messagesPerDay.length === 8);
