@@ -5,9 +5,12 @@
 #   secret   CRON_SECRET  = el mismo valor que la variable CRON_SECRET de Vercel
 #   variable APP_URL      = https://chatsyncs-replica.vercel.app
 name: cron-tick
+# DESACTIVADO (2026-11-06): el schedule cada 5 min se quitó porque la base de datos
+# de Supabase no responde y cada fallo enviaba un correo. Ver docs/CRON-DESACTIVADO.md
+# Para reactivar: restaurar el bloque `schedule` de abajo.
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # schedule:
+  #   - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
